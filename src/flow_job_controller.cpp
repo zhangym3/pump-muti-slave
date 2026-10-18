@@ -23,6 +23,12 @@ Reply FlowJobController::configure(uint32_t k, uint32_t version) {
   if (!s_.key.valid()) s_.k = k; // Completed doses retain their original calibration.
   return Reply::Ok;
 }
+Reply FlowJobController::canCommission() {
+  if (busy() || output()) return Reply::Busy;
+  if (!validK(cfg_.k) || !cfg_.version) return Reply::Invalid;
+  if (!io_.interlock()) return Reply::NotReady;
+  return Reply::Ok;
+}
 Reply FlowJobController::prepare(const Dose &d, uint32_t now) {
   if (!d.key.valid()) return Reply::Invalid;
   if (d.key == s_.key) {

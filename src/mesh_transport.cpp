@@ -32,6 +32,8 @@ esp_ble_mesh_model_op_t operations[] = {
   {ESP_BLE_MESH_MODEL_OP_3(0xC9, CompanyId), 46, 0},
   {ESP_BLE_MESH_MODEL_OP_3(0xCA, CompanyId), 9, 0},
   {ESP_BLE_MESH_MODEL_OP_3(0xCB, CompanyId), 6, 0},
+  {ESP_BLE_MESH_MODEL_OP_3(0xCC, CompanyId), 4, 0},
+  {ESP_BLE_MESH_MODEL_OP_3(0xCD, CompanyId), 14, 0},
   ESP_BLE_MESH_MODEL_OP_END
 };
 esp_ble_mesh_model_t sigModels[] = { ESP_BLE_MESH_MODEL_CFG_SRV(&config) };
@@ -66,7 +68,7 @@ void modelCb(esp_ble_mesh_model_cb_event_t event, esp_ble_mesh_model_cb_param_t 
   if (!m.ctx || m.ctx->net_idx != 0 || m.ctx->app_idx != 0 ||
       m.length > sizeof(Packet::bytes) || (m.opcode & 0xFFFF) != CompanyId) return;
   const uint8_t code = uint8_t(m.opcode >> 16);
-  if (code < uint8_t(Op::Prepare) || code > uint8_t(Op::HelloReply)) return;
+  if (code < uint8_t(Op::Prepare) || code > uint8_t(Op::CommissionReply)) return;
   auto in = packet(Op(code), m.ctx->addr);
   in.size = uint8_t(m.length);
   memcpy(in.bytes, m.msg, in.size);

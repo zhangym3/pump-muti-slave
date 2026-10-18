@@ -8,6 +8,7 @@ extern "C" void app_main() {
   hardware.safeOff();
   if (!storage.open(board::ProfileId) || !hardware.init()) { ESP_LOGE("boot", "slave storage/profile/hardware invalid: valve OFF; NVS preserved"); return; }
   auto config = board::valveConfig(); config.k = storage.state().k; config.version = storage.state().kVersion;
+  config.commissioned = storage.commissioned();
   static FlowJobController valve(hardware, config);
   valve.boot(storage.state().fence, storage.state().revisionBase);
   if (storage.state().resultValid) valve.restore(storage.state().result);

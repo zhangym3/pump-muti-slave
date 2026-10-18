@@ -49,6 +49,38 @@ void Application::incoming(const Packet &packetIn, uint32_t now) {
       if (reader.done() && epoch) { masterEpoch_ = epoch; masterSeenAt_ = now; }
       break;
     }
+    case Op::Commission: {
+      const uint32_t request = reader.u32();
+      if (!reader.done() || !request) return;
+      Reply result = Reply::Ok;
+      if (!storageHealthy_) result = Reply::Storage;
+      else if (store_.commissioned()) result = Reply::Ok;
+      else if (!mesh_.ready() || !unicast(mesh_.address())) result = Reply::NotReady;
+      else {
+        result = valve_.canCommission();
+        if (result == Reply::Ok && !store_.setCommissioned(true)) {
+          storageHealthy_ = false;
+          result = Reply::Storage;
+        }
+        if (result == Reply::Ok) valve_.setCommissioned(true);
+      }
+      auto reply = packet(Op::CommissionReply, store_.state().master);
+      Writer writer{reply}; writer.u32(request); writer.u8(uint8_t(result));
+      writer.u8(store_.commissioned() && storageHealthy_ ? 1 : 0);
+      writer.u32(valve_.config().k); writer.u32(valve_.config().version);
+      mesh_.send(reply);
+      if (result == Reply::Ok) {
+        auto hello = packet(Op::Hello, store_.state().master);
+        Writer helloWriter{hello}; helloWriter.u32(valve_.config().k); helloWriter.u32(valve_.config().version);
+        helloWriter.u8(store_.commissioned() && storageHealthy_ ? 1 : 0);
+        mesh_.send(hello);
+      }
+      char line[96];
+      snprintf(line, sizeof(line), "COMMISSION req=%lu reply=%s commissioned=%u",
+        static_cast<unsigned long>(request), replyName(result), store_.commissioned() && storageHealthy_);
+      gateway_.publish(line);
+      break;
+    }
     case Op::Prepare: {
       Dose dose;
       dose.key = reader.key(); dose.ml = reader.u32(); dose.pulses = reader.u32();

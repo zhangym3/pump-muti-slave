@@ -23,7 +23,7 @@ enum class Reason : uint8_t { None, Target, Manual, Lease, Runtime, NoFlow, Prep
 enum class Reply : uint8_t { Ok, Busy, Invalid, Stale, Conflict, NotReady, Storage, Unauthorized,
   Offline, Capacity, Pending, Unknown };
 enum class Op : uint8_t { Prepare = 0xC0, Start, Lease, Close, StatusGet, Status,
-  Summary, EventAck, Request, Response, Hello, HelloReply };
+  Summary, EventAck, Request, Response, Hello, HelloReply, Commission, CommissionReply };
 enum class Action : uint8_t { Start = 1, Stop, Query };
 
 // All multibyte wire fields are explicitly little endian. Never memcpy C++ structs.

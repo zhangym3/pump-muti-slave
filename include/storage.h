@@ -32,10 +32,13 @@ class Storage {
   bool open(uint32_t profile);
   const PersistentState &state() const { return state_; }
   bool write(const PersistentState &next);
+  bool commissioned() const { return commissioned_; }
+  bool setCommissioned(bool value);
   bool fence(JobKey key);
   bool result(const ValveStatus &s);
  private:
   nvs_handle_t handle_ = 0;
   PersistentState state_;
+  bool commissioned_ = false;
 };
 }

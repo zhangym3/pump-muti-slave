@@ -34,6 +34,24 @@ void validation_and_calibration() {
   auto calibrated = dose(); calibrated.pulses = 200; calibrated.k = 2000; calibrated.version = 2;
   CHECK(controller.prepare(calibrated, 0) == Reply::Ok); CHECK(controller.configure(3000, 3) == Reply::Busy);
 }
+void commission_gate() {
+  FakeValve io; auto uncommissioned = config(); uncommissioned.commissioned = false;
+  FlowJobController controller(io, uncommissioned); controller.boot({});
+  CHECK(controller.canCommission() == Reply::Ok);
+  io.healthy = false; CHECK(controller.canCommission() == Reply::NotReady);
+  io.healthy = true;
+  auto invalid = uncommissioned; invalid.k = 0;
+  FlowJobController invalidController(io, invalid); invalidController.boot({});
+  CHECK(invalidController.canCommission() == Reply::Invalid);
+
+  FlowJobController busyController(io, config()); busyController.boot({});
+  CHECK(busyController.prepare(dose(), 0) == Reply::Ok);
+  CHECK(busyController.canCommission() == Reply::Busy);
+  CHECK(busyController.start({1, 1}, 1) == Reply::Ok);
+  CHECK(busyController.output()); CHECK(busyController.canCommission() == Reply::Busy);
+  busyController.emergency(Reason::Manual, 2);
+  CHECK(!busyController.output()); CHECK(busyController.canCommission() == Reply::Ok);
+}
 void leases_and_interlock() {
   FakeValve io; FlowJobController controller(io, config()); controller.boot({});
   CHECK(controller.prepare(dose(), 0) == Reply::Ok); CHECK(controller.start({1, 1}, 1) == Reply::Ok);
@@ -48,6 +66,7 @@ void leases_and_interlock() {
 void wire_contract_vectors() {
   CHECK(uint16_t(CompanyId) == 0x02E5 && uint16_t(ModelId) == 0x0001 && uint16_t(AllSlaves) == 0xC001);
   CHECK(uint8_t(Op::Prepare) == 0xC0 && uint8_t(Op::HelloReply) == 0xCB);
+  CHECK(uint8_t(Op::Commission) == 0xCC && uint8_t(Op::CommissionReply) == 0xCD);
   ControlRequest q; q.action = Action::Start; q.epoch = 0x11223344; q.client = 0x0102030405060708ULL;
   q.sequence = 0x99AABBCC; q.mask = 0x80000001; q.ml = 500; q.maxMs = 60000; q.stopKey = {0x55667788, 0xAABBCCDD};
   const uint8_t expected[] = {1, 0x44, 0x33, 0x22, 0x11, 8, 7, 6, 5, 4, 3, 2, 1,
@@ -60,4 +79,4 @@ void wire_contract_vectors() {
     decoded.maxMs == q.maxMs && decoded.stopKey == q.stopKey);
   --p.size; CHECK(!decodeRequest(p, decoded));
 }
-int main() { target_and_tail(); validation_and_calibration(); leases_and_interlock(); wire_contract_vectors(); std::puts("slave flow tests passed"); }
+int main() { target_and_tail(); validation_and_calibration(); commission_gate(); leases_and_interlock(); wire_contract_vectors(); std::puts("slave flow tests passed"); }
