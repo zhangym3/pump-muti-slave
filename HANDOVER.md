@@ -1,0 +1,57 @@
+# ESP32-C3 Super Mini 从节点交接
+
+## 最新补充：PB-ADV 实板修复
+
+现场 C3 从机已修复默认 Bluedroid BLE 5.0 功能与当前 Mesh 传统扫描接口不匹配的问题：关闭 CONFIG_BT_BLE_50_FEATURES_SUPPORTED，启用 CONFIG_BT_BLE_42_FEATURES_SUPPORTED，同步默认与已生成配置，移除无效的延迟重试。已编译、烧录并验证无延迟 `node provisioning enabled (PB-ADV)`，USB hello/local 正常，阀门输出为 0。主机启动及再次重启后均可扫描到从机。固件包已更新；构建和串口日志保留在本地 `.pio` 目录，不纳入版本库。手机只连主机，通过“添加设备”查看从机标签；普通手机蓝牙列表不会出现此名称。尚未执行点击组网和水路验收。下文为此前拆分记录，“未烧录”“USB 待验证”不代表本轮最新结果。
+
+2026-10-17，从原双角色工程拆分而来。当前目录 D:/pump/pump-muti-slave 只构建 valve_slave_c3，从机芯片固定 ESP32-C3，4MB Flash，DIO / 40MHz，ESP-IDF 5.4.0。
+
+## 工程入口
+
+- PlatformIO 打开当前目录，选择唯一环境 valve_slave_c3。
+- 主节点在 D:/pump/pump-muti，只构建 ESP32 pump_master。
+- 本工程是独立源码副本，编译不引用主机目录。主机调度、泵安全和 Provisioner 管理源码不进入本工程；协议修改需要同步两边并通过固定向量测试。
+- include/protocol.h、src/protocol.cpp、include/control_request.h、docs/PROTOCOL.md 与主机当前版本完全一致。
+
+## 接线与控制
+
+用户提供的 Super Mini 引脚图在 [docs/PINOUT.md](docs/PINOUT.md)，原图位于 docs/images/esp32c3-super-mini.jpg。
+
+| 用途 | GPIO |
+| --- | --- |
+| 阀门功率驱动输入 | 4，高有效、外部下拉 |
+| 流量脉冲输入 | 5，3.3V 逻辑，下降沿计数 |
+| 联锁输入 | 6，3.3V HIGH 许可，外部下拉 |
+| 下载、启动日志、维护命令 | 板载 USB Serial/JTAG，底层 GPIO18/19 |
+| 备用 UART0 | RX20 / TX21，当前不用作命令入口 |
+
+valveConfig().commissioned=false，须完成实际接线、驱动、联锁、K 标定和限值验证后启用并重新构建。ProfileId=0x56530002，与此前 C3 档案保持一致；不可把经典 ESP32 的 NVS 直接复制到 C3。上电先置输出低，保留本地到量关阀、无流量超时、联锁和租约保护。
+
+从机不开放手机业务 GATT/PIN；手机通过 Master 管理。从机只使用 Mesh PB-ADV 和 Vendor Model，PB-GATT、GATT Proxy 均关闭。`PUMP_SLAVE_XXXX` 是由 UUID 推导的身份标签，不是普通手机蓝牙扫描中的 GAP 名称。Master 完成 AppKey0/模型绑定/C001/HELLO 后登记节点。入网不会自动启用阀门。新从机不要求配置手机六位 PIN。
+
+## 构建、打包和升级
+
+```powershell
+Set-Location D:/pump/pump-muti-slave
+pio run -e valve_slave_c3
+python tools/package_firmware.py
+```
+
+产物在 dist/valve_slave_c3，仅包含本角色的 3 个镜像；manifest 记录目标芯片、偏移、镜像 SHA256 和源码配置哈希。引导程序=0x0，分区表=0x8000，应用=0x20000，NVS=0x9000/64KB，正常更新保留 NVS。
+
+确认端口后使用 `pio run -e valve_slave_c3 -t upload --upload-port COMx`；不要使用主机 ESP32 镜像。原生 USB 下载/应用状态端口可能变化，需要时 BOOT+复位进入下载模式。
+
+维护命令走板载 USB：hello、local、master 实际主地址、k 实测系数、estop，均带换行。USB 回复等待在独立任务中有界，断开 USB 不影响控制任务继续运行。当前实现编译通过，原生 USB 输入输出仍待实板验收。
+
+## 验证结果
+
+- 独立编译成功，119.56 秒；RAM=31896 字节，Flash=1017536 字节；应用镜像 1017936 字节。
+- 本工程独立运行 24 组控制器 host 测试通过；测试编译器可单独指定，不随源码复制。
+- 从机目标配置为 esp32c3、单核、USB Serial/JTAG 控制台、BT_ALARM_MAX_NUM=128，且不启用 Provisioner/CFG_CLI；本轮已执行 PlatformIO clean build，`valve_slave_c3` SUCCESS。构建保留 ESP-IDF Mesh 宏缺省字段和 volatile 增量警告。
+- 已核对生成分区、DIO/40MHz/4MB 镜像头及 3 个发布镜像/源码 SHA256。
+- 应用 SHA256：9a39ec29820980685011225a3e0bd72038474d6fff920eff8e923437cd0fe4c2。
+- 证据：.pio/split-slave-build.log、.pio/split-host-tests.log、.pio/split-validation.json、dist/manifest.json。
+
+本次没有烧录设备，没有清空任何 NVS，也没有发送泵阀输出指令。`LEGACY_NETWORK` 仅作为主机兼容状态保留；新版 Master 启动流程自动处理旧 Node 角色，APP 不提供迁移步骤。仍待验证 C3 USB、单台从机组网、重启恢复、联锁、阀门和流量标定。32 槽位容量不代表已完成 32 台无线/水路验收。
+
+完整操作见 [README.md](README.md)，协议见 [PROTOCOL.md](docs/PROTOCOL.md)。

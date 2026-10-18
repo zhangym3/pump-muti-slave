@@ -1,0 +1,9 @@
+
+core_tests.cpp exercises the production pure-C++ controllers on a host PC.
+Run from the project root:
+
+  python tools/run_host_tests.py --compiler C:\path\to\zig.exe
+
+An installed clang++ or g++ can also be supplied. This is a standalone host
+harness, not a PlatformIO device test. It does not flash hardware.
+See docs/VALIDATION.md for coverage and hardware-validation limits.
