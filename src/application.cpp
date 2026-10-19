@@ -23,15 +23,9 @@ void Application::status(bool force) {
   mesh_.send(packetOut);
 }
 
-void Application::reject(JobKey key, Reply reply) {
-  ValveStatus fault;
-  fault.key = key;
-  fault.k = valve_.config().k;
-  fault.phase = Phase::Fault;
-  fault.reason = Reason::Protocol;
-  fault.revision = valve_.status().revision;
-  auto packetOut = packet(Op::Status, store_.state().master);
-  encodeStatus(packetOut, fault);
+void Application::reject(JobKey key, Op command, Reply reply) {
+  auto packetOut = packet(Op::CommandReply, store_.state().master);
+  Writer writer{packetOut}; writer.key(key); writer.u8(uint8_t(command)); writer.u8(uint8_t(reply));
   mesh_.send(packetOut);
   char line[64];
   snprintf(line, sizeof(line), "JOB_REJECT %s", replyName(reply));
@@ -87,20 +81,23 @@ void Application::incoming(const Packet &packetIn, uint32_t now) {
       dose.k = reader.u32(); dose.version = reader.u32(); dose.maxMs = reader.u32();
       if (!reader.done()) return;
       const Reply result = storageHealthy_ ? valve_.prepare(dose, now) : Reply::Storage;
-      if (result == Reply::Ok) status(true); else reject(dose.key, result);
+      if (result == Reply::Ok) status(true); else reject(dose.key, Op::Prepare, result);
       break;
     }
     case Op::Start: {
       const JobKey key = reader.key();
       if (!reader.done()) return;
-      valve_.start(key, now);
-      status(true);
+      const Reply result = valve_.start(key, now);
+      if (result == Reply::Ok) status(true); else reject(key, Op::Start, result);
       break;
     }
     case Op::Lease: {
       const JobKey key = reader.key();
       const uint32_t sequence = reader.u32();
-      if (reader.done()) valve_.lease(key, sequence, now);
+      if (!reader.done() || !key.valid() || !sequence) break;
+      const Reply result = valve_.lease(key, sequence, now);
+      leaseAckKey_ = key; leaseAckSequence_ = sequence; leaseAckReply_ = result;
+      leaseAckReceivedAt_ = now; leaseAckPending_ = true;
       break;
     }
     case Op::Close: {
@@ -142,6 +139,9 @@ void Application::localState(uint32_t) {
     static_cast<unsigned long>(valve_.config().k), static_cast<unsigned long>(valve_.config().version),
     current.quiet, current.truncated);
   gateway_.publish(line);
+  snprintf(line, sizeof(line), "INTERLOCK enabled=%u ready=%u pin=%d",
+    board::SlaveInterlockEnabled, hw_.interlock(), board::SlaveInterlock);
+  gateway_.publish(line);
 }
 
 void Application::command(CommandLine &line, uint32_t) {
@@ -176,8 +176,12 @@ void Application::command(CommandLine &line, uint32_t) {
       gateway_.publish("INVALID k"); return;
     }
     auto next = store_.state(); next.k = uint32_t(k); ++next.kVersion;
+    const Reply validation = valve_.canConfigure(next.k, next.kVersion);
+    if (validation != Reply::Ok) { gateway_.publish(replyName(validation)); return; }
     if (!store_.write(next)) { storageHealthy_ = false; gateway_.publish("STORAGE"); return; }
-    gateway_.publish(replyName(valve_.configure(next.k, next.kVersion)));
+    const Reply configured = valve_.configure(next.k, next.kVersion);
+    if (configured != Reply::Ok) storageHealthy_ = false;
+    gateway_.publish(replyName(configured));
     return;
   }
   if (!strcmp(op, "master") && count == 2) {
@@ -205,6 +209,13 @@ void Application::periodic(uint32_t now) {
     Writer writer{hello}; writer.u32(valve_.config().k); writer.u32(valve_.config().version);
     writer.u8(valve_.config().commissioned && storageHealthy_);
     mesh_.send(hello); helloAt_ = now;
+  }
+  const uint32_t leaseReplyDelay = (mesh_.address() % 32) * 13;
+  if (leaseAckPending_ && elapsed(now, leaseAckReceivedAt_, leaseReplyDelay) && mesh_.ready()) {
+    auto ack = packet(Op::LeaseAck, store_.state().master);
+    Writer writer{ack}; writer.key(leaseAckKey_); writer.u32(leaseAckSequence_);
+    writer.u8(uint8_t(leaseAckReply_));
+    if (mesh_.send(ack)) leaseAckPending_ = false;
   }
   if (current.key != sentKey_ || current.revision != sentRevision_) {
     sentKey_ = current.key; sentRevision_ = current.revision; eventAttempts_ = 0; eventAt_ = now - 1000;

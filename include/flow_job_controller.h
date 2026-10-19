@@ -41,6 +41,7 @@ class FlowJobController {
   void emergency(Reason reason, uint32_t now);
   void tick(uint32_t now);
   Reply configure(uint32_t k, uint32_t version);
+  Reply canConfigure(uint32_t k, uint32_t version) const;
   Reply canCommission();
   void setCommissioned(bool value) { cfg_.commissioned = value; }
   bool busy() const;

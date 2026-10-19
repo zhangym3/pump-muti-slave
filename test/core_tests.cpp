@@ -50,13 +50,17 @@ void commission_gate() {
   CHECK(busyController.start({1, 1}, 1) == Reply::Ok);
   CHECK(busyController.output()); CHECK(busyController.canCommission() == Reply::Busy);
   busyController.emergency(Reason::Manual, 2);
-  CHECK(!busyController.output()); CHECK(busyController.canCommission() == Reply::Ok);
+  CHECK(!busyController.output()); CHECK(busyController.canCommission() == Reply::Busy);
+  busyController.tick(502);
+  CHECK(busyController.status().phase == Phase::Done);
+  CHECK(busyController.canCommission() == Reply::Ok);
 }
 void leases_and_interlock() {
   FakeValve io; FlowJobController controller(io, config()); controller.boot({});
   CHECK(controller.prepare(dose(), 0) == Reply::Ok); CHECK(controller.start({1, 1}, 1) == Reply::Ok);
   CHECK(controller.lease({1, 1}, 1, 1000) == Reply::Ok);
-  CHECK(controller.lease({1, 1}, 1, 3999) == Reply::Stale);
+  CHECK(controller.lease({1, 1}, 1, 3999) == Reply::Ok); // Duplicate ACK does not renew the lease.
+  CHECK(controller.status().revision == 2 && controller.output());
   controller.tick(4000); CHECK(!io.on && controller.status().reason == Reason::Lease);
   FakeValve broken; FlowJobController unsafe(broken, config()); unsafe.boot({});
   CHECK(unsafe.prepare(dose(), 0) == Reply::Ok); CHECK(unsafe.start({1, 1}, 1) == Reply::Ok);

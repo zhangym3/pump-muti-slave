@@ -17,10 +17,15 @@ void FlowJobController::restore(const ValveStatus &result) {
   }
 }
 Reply FlowJobController::configure(uint32_t k, uint32_t version) {
-  if (busy()) return Reply::Busy;
-  if (!validK(k) || !version || version <= cfg_.version) return Reply::Invalid;
+  const Reply validation = canConfigure(k, version);
+  if (validation != Reply::Ok) return validation;
   cfg_.k = k; cfg_.version = version;
   if (!s_.key.valid()) s_.k = k; // Completed doses retain their original calibration.
+  return Reply::Ok;
+}
+Reply FlowJobController::canConfigure(uint32_t k, uint32_t version) const {
+  if (busy()) return Reply::Busy;
+  if (!validK(k) || !version || version <= cfg_.version) return Reply::Invalid;
   return Reply::Ok;
 }
 Reply FlowJobController::canCommission() {
@@ -34,7 +39,7 @@ Reply FlowJobController::prepare(const Dose &d, uint32_t now) {
   if (d.key == s_.key) {
     if (d.ml != dose_.ml || d.pulses != dose_.pulses || d.k != dose_.k ||
         d.version != dose_.version || d.maxMs != dose_.maxMs) return Reply::Conflict;
-    return s_.phase == Phase::Prepared ? Reply::Ok : Reply::Stale;
+    return s_.phase >= Phase::Prepared ? Reply::Ok : Reply::Stale;
   }
   if (!d.key.newer(fence_)) return Reply::Stale;
   if (busy()) return Reply::Busy;
@@ -65,6 +70,9 @@ Reply FlowJobController::lease(JobKey key, uint32_t seq, uint32_t now) {
   if (key != s_.key || !s_.valveCommand) return Reply::Stale;
   // A delayed renewal cannot resurrect an already expired lease.
   if (elapsed(now, leaseAt_, LeaseMs)) { shut(Reason::Lease, now); return Reply::Stale; }
+  // Retransmitted multicast renewals are acknowledged without extending the
+  // lease a second time; this makes reply loss safe and deterministic.
+  if (seq == leaseSeq_) return Reply::Ok;
   if (!serialNewer(seq, leaseSeq_)) return Reply::Stale;
   leaseSeq_ = seq; leaseAt_ = now; return Reply::Ok;
 }

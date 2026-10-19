@@ -31,11 +31,17 @@ static bool flowPin(int pin, PulseCounter *counter) {
 bool Hardware::init() {
   safeOff();
   if (gpio_install_isr_service(ESP_INTR_FLAG_IRAM) != ESP_OK) return false;
-  gpio_config_t interlock{}; interlock.mode = GPIO_MODE_INPUT;
-  interlock.pin_bit_mask = 1ULL << board::SlaveInterlock;
-  return gpio_config(&interlock) == ESP_OK && flowPin(board::BranchFlow, &primary_);
+  if constexpr (board::SlaveInterlockEnabled) {
+    gpio_config_t interlock{}; interlock.mode = GPIO_MODE_INPUT;
+    interlock.pin_bit_mask = 1ULL << board::SlaveInterlock;
+    if (gpio_config(&interlock) != ESP_OK) return false;
+  }
+  return flowPin(board::BranchFlow, &primary_);
 }
 FlowReading Hardware::flow() { return read(primary_); }
-bool Hardware::interlock() { return gpio_get_level(gpio_num_t(board::SlaveInterlock)) == 1; }
+bool Hardware::interlock() {
+  if constexpr (!board::SlaveInterlockEnabled) return true;
+  return gpio_get_level(gpio_num_t(board::SlaveInterlock)) == 1;
+}
 void Hardware::valve(bool on) { gpio_set_level(gpio_num_t(board::Output), on ? 1 : 0); }
 }

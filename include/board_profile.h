@@ -10,7 +10,9 @@ constexpr uint32_t ProfileId = 0x56530002; // Preserve the ESP32-C3 slave hardwa
 // ESP32-C3 Super Mini: use printed GPIO numbers, not header position numbers.
 constexpr int Output = 4; // Active-HIGH valve driver input; external pull-down.
 constexpr int BranchFlow = 5, SlaveInterlock = 6;
-// Slave interlock: healthy HIGH at 3.3 V, external pull-down makes a broken wire LOW.
+// No external safety switch is fitted on the current three-wire flow-sensor installation.
+constexpr bool SlaveInterlockEnabled = false;
+// When enabled: healthy HIGH at 3.3 V; fit an external pull-down for broken-wire detection.
 constexpr uint32_t HallMinEdgeUs = 100;
 constexpr uint8_t MaxConcurrent = 1; // Raise only after hydraulic validation.
 constexpr ValveConfig valveConfig() {
