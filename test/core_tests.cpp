@@ -83,4 +83,22 @@ void wire_contract_vectors() {
     decoded.maxMs == q.maxMs && decoded.stopKey == q.stopKey);
   --p.size; CHECK(!decodeRequest(p, decoded));
 }
-int main() { target_and_tail(); validation_and_calibration(); commission_gate(); leases_and_interlock(); wire_contract_vectors(); std::puts("slave flow tests passed"); }
+void transport_lock() {
+  for(unsigned phase=0;phase<4;++phase) {
+    FakeValve io; FlowJobController c(io,config()); c.boot({});
+    if(phase>0) CHECK(c.prepare(dose(),0)==Reply::Ok);
+    if(phase>1) CHECK(c.start({1,1},1)==Reply::Ok);
+    if(phase==3) { io.reading.pulses=100; c.tick(2); c.tick(502); CHECK(c.status().phase==Phase::Done); }
+    c.emergency(Reason::Transport,600); CHECK(!io.on && c.transportFault()); c.tick(1100);
+    const auto stopped=c.status(); const auto writes=io.writes;
+    CHECK(c.prepare(dose(),1200)==Reply::NotReady);
+    CHECK(c.prepare(dose({1,2}),1200)==Reply::NotReady);
+    CHECK(c.start({1,1},1200)==Reply::NotReady && c.lease({1,1},2,1200)==Reply::NotReady);
+    CHECK(c.canCommission()==Reply::NotReady && !io.on && io.writes==writes);
+    CHECK(c.configure(2000,2)==Reply::Ok); c.setCommissioned(true);
+    c.close({1,1},Reason::Manual,1300); c.emergency(Reason::Manual,1300);
+    CHECK(c.transportFault() && c.prepare(dose({1,2}),1400)==Reply::NotReady && !io.on);
+    if(stopped.key.valid()) CHECK(c.status().key==stopped.key);
+  }
+}
+int main() { target_and_tail(); validation_and_calibration(); commission_gate(); leases_and_interlock(); wire_contract_vectors(); transport_lock(); std::puts("PASS transport fault locks idle/prepared/open/terminal control until controlled restart"); std::puts("slave flow tests passed"); }

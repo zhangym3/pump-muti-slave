@@ -8,6 +8,7 @@ void FlowJobController::change(Phase p) { s_.phase = p; ++s_.revision; }
 void FlowJobController::boot(JobKey persisted, uint32_t revisionBase) {
   io_.valve(false); fence_ = persisted; s_ = {}; s_.k = cfg_.k; storageFault_ = false;
   revisionBase_ = s_.revision = revisionBase;
+  transportFault_ = false;
   if (persisted.valid()) { s_.key = persisted; s_.reason = Reason::Reboot; s_.truncated = true; change(Phase::Fault); }
 }
 void FlowJobController::restore(const ValveStatus &result) {
@@ -29,12 +30,14 @@ Reply FlowJobController::canConfigure(uint32_t k, uint32_t version) const {
   return Reply::Ok;
 }
 Reply FlowJobController::canCommission() {
+  if (transportFault_) return Reply::NotReady;
   if (busy() || output()) return Reply::Busy;
   if (!validK(cfg_.k) || !cfg_.version) return Reply::Invalid;
   if (!io_.interlock()) return Reply::NotReady;
   return Reply::Ok;
 }
 Reply FlowJobController::prepare(const Dose &d, uint32_t now) {
+  if (transportFault_) return Reply::NotReady;
   if (!d.key.valid()) return Reply::Invalid;
   if (d.key == s_.key) {
     if (d.ml != dose_.ml || d.pulses != dose_.pulses || d.k != dose_.k ||
@@ -55,6 +58,7 @@ Reply FlowJobController::prepare(const Dose &d, uint32_t now) {
   preparedAt_ = now; change(Phase::Prepared); return Reply::Ok;
 }
 Reply FlowJobController::start(JobKey key, uint32_t now) {
+  if (transportFault_) return Reply::NotReady;
   if (key != s_.key) return Reply::Stale;
   if (s_.phase == Phase::Opening || s_.phase == Phase::Running) return Reply::Ok;
   if (s_.phase != Phase::Prepared) return Reply::Stale;
@@ -67,6 +71,7 @@ Reply FlowJobController::start(JobKey key, uint32_t now) {
   io_.valve(true); change(Phase::Opening); return Reply::Ok;
 }
 Reply FlowJobController::lease(JobKey key, uint32_t seq, uint32_t now) {
+  if (transportFault_) return Reply::NotReady;
   if (key != s_.key || !s_.valveCommand) return Reply::Stale;
   // A delayed renewal cannot resurrect an already expired lease.
   if (elapsed(now, leaseAt_, LeaseMs)) { shut(Reason::Lease, now); return Reply::Stale; }
@@ -100,7 +105,10 @@ void FlowJobController::close(JobKey key, Reason reason, uint32_t now) {
     change(reason == Reason::Manual && !storageFault_ ? Phase::Done : Phase::Fault);
   }
 }
-void FlowJobController::emergency(Reason r, uint32_t now) { shut(r, now); }
+void FlowJobController::emergency(Reason r, uint32_t now) {
+  if (r == Reason::Transport) transportFault_ = true;
+  shut(r, now);
+}
 void FlowJobController::tick(uint32_t now) {
   if (s_.phase == Phase::Prepared) {
     if (!io_.interlock()) shut(Reason::LocalInterlock, now);

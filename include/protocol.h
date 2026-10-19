@@ -1,4 +1,5 @@
-#pragma once
+#ifndef PUMP_PROTOCOL_H
+#define PUMP_PROTOCOL_H
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -10,6 +11,7 @@ constexpr uint16_t ModelId = 0x0001;
 constexpr uint16_t AllSlaves = 0xC001;
 constexpr uint32_t LeaseMs = 3000;
 constexpr uint32_t TelemetryMs = 2000;
+constexpr uint16_t ProtocolRevision = 2, RequiredFeatures = 0x000F;
 struct JobKey {
   uint32_t epoch = 0, id = 0;
   bool operator==(const JobKey &b) const { return epoch == b.epoch && id == b.id; }
@@ -24,7 +26,7 @@ enum class Reply : uint8_t { Ok, Busy, Invalid, Stale, Conflict, NotReady, Stora
   Offline, Capacity, Pending, Unknown };
 enum class Op : uint8_t { Prepare = 0xC0, Start, Lease, Close, StatusGet, Status,
   Summary, EventAck, Request, Response, Hello, HelloReply, Commission, CommissionReply,
-  LeaseAck, CommandReply };
+  LeaseAck, CommandReply, CapabilitiesGet, Capabilities };
 enum class Action : uint8_t { Start = 1, Stop, Query };
 
 // All multibyte wire fields are explicitly little endian. Never memcpy C++ structs.
@@ -72,3 +74,5 @@ const char *phaseName(Phase p);
 const char *reasonName(Reason r);
 const char *replyName(Reply r);
 }
+
+#endif

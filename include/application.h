@@ -13,10 +13,11 @@ class Application {
  private:
   void incoming(const Packet &p, uint32_t now);
   void command(CommandLine &c, uint32_t now);
-  void status(bool force = false);
+  bool status(bool force = false);
   void reject(JobKey key, Op command, Reply reply);
   void periodic(uint32_t now);
   void localState(uint32_t now);
+  void meshState();
   Storage &store_;
   Hardware &hw_;
   MeshTransport &mesh_;
@@ -26,10 +27,6 @@ class Application {
   uint32_t ackedRevision_ = UINT32_MAX, sentRevision_ = UINT32_MAX, savedRevision_ = UINT32_MAX;
   uint32_t eventAttempts_ = 0;
   JobKey ackedKey_, sentKey_, savedKey_;
-  JobKey leaseAckKey_;
-  uint32_t leaseAckSequence_ = 0, leaseAckReceivedAt_ = 0;
-  Reply leaseAckReply_ = Reply::Stale;
-  bool leaseAckPending_ = false;
   bool storageHealthy_ = true, savedJob_ = true;
 };
 }

@@ -1,5 +1,5 @@
 #pragma once
-#include "protocol.h"
+#include "valve_status.h"
 namespace pump {
 struct FlowReading { uint32_t pulses = 0, lastMs = 0; };
 struct ValveConfig {
@@ -11,14 +11,6 @@ struct ValveConfig {
 struct Dose {
   JobKey key;
   uint32_t ml = 0, pulses = 0, k = 0, version = 0, maxMs = 0;
-};
-struct ValveStatus {
-  JobKey key;
-  uint32_t pulses = 0, closePulses = 0, k = 5880;
-  Phase phase = Phase::Idle;
-  Reason reason = Reason::None;
-  bool valveCommand = false, quiet = false, truncated = false;
-  uint32_t revision = 0;
 };
 class ValveIO {
  public:
@@ -46,6 +38,7 @@ class FlowJobController {
   void setCommissioned(bool value) { cfg_.commissioned = value; }
   bool busy() const;
   bool output() const { return s_.valveCommand; }
+  bool transportFault() const { return transportFault_; }
   ValveStatus status() const { return s_; }
   const ValveConfig &config() const { return cfg_; }
  private:
@@ -56,7 +49,7 @@ class FlowJobController {
   ValveStatus s_;
   Dose dose_;
   JobKey fence_;
-  bool storageFault_ = false;
+  bool storageFault_ = false, transportFault_ = false;
   uint32_t revisionBase_ = 0;
   uint32_t baseline_ = 0, preparedAt_ = 0, openedAt_ = 0, leaseAt_ = 0;
   uint32_t leaseSeq_ = 0, closedAt_ = 0, lastPulseAt_ = 0, lastCount_ = 0;

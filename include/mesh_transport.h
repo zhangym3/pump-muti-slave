@@ -1,5 +1,6 @@
 #pragma once
 #include "protocol.h"
+#include "mesh_tx_governor.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include <atomic>
@@ -17,9 +18,17 @@ class MeshTransport final {
   bool takeOverflow() { return overflow_.exchange(false); }
   void incoming(const Packet &p);
   void worker();
+  bool takeSubmission(MeshSubmission &out);
+  void fence(JobKey job);
+  bool healthy() const;
+  MeshTxGovernor::Metrics metrics() const;
+  MeshTxGovernor::Diagnostics diagnostics() const;
+  void trackedEvent(uint32_t ticket, uint8_t event, int error);
  private:
   char deviceName_[24] = {};
-  QueueHandle_t rx_ = nullptr, urgentRx_ = nullptr, tx_ = nullptr, urgentTx_ = nullptr;
+  QueueHandle_t rx_ = nullptr, urgentRx_ = nullptr;
+  mutable portMUX_TYPE txLock_ = portMUX_INITIALIZER_UNLOCKED;
+  MeshTxGovernor tx_{1};
   std::atomic<bool> overflow_{false};
   std::atomic<uint16_t> master_{1};
 };

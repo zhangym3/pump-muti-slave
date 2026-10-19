@@ -1,0 +1,85 @@
+{
+  "version": "pump-sar-1",
+  "inputs": {
+    "package.json": "8038fceb30b894871e2d986d6c5ec0527035ba4cd534f3435f6a423bdafe1145",
+    "version.txt": "742c2c22a2ebdb26fb9bf21f6f9df508587b7eccd9d59485a4f45935adafde23",
+    "components/bt/esp_ble_mesh/core/transport.c": "752dd7f8be6645ac6bacf7c654ac92b921844ffe65afec7c26e0ab1276896243",
+    "components/bt/esp_ble_mesh/core/access.c": "f9a98a9d1b3d7f21fd5afc0f07e2716b6544b9935e23fc451a7759e232cef699",
+    "components/bt/esp_ble_mesh/core/net.c": "ef39bd3b9ad9d00903d647c3d533ad731dc17c388d3a96dad5404eb70827fb34",
+    "components/bt/esp_ble_mesh/api/core/esp_ble_mesh_networking_api.c": "0afc15b87d9f90c179295ba4a085c0b73f483bc194412f95c10290ac24ba7704",
+    "components/bt/esp_ble_mesh/api/core/include/esp_ble_mesh_networking_api.h": "4ad4b379d9b995741ab80ecbc2f79f54e49e338a007de50782bccbc3bad0cf44",
+    "components/bt/esp_ble_mesh/btc/btc_ble_mesh_prov.c": "1c88c3b76722a67cb9c803f7bc94378fe160d6fd27846b5d9d14d87b500ad54f",
+    "components/bt/esp_ble_mesh/btc/include/btc_ble_mesh_prov.h": "4e25be6d3d18ced9f3ab09e169cae36bb84efbfc877504c44db5068a2c0e76a2"
+  },
+  "edits": {
+    "esp_ble_mesh/api/core/esp_ble_mesh_networking_api.c": [
+      {
+        "old": "#include \"esp_ble_mesh_networking_api.h\"",
+        "new": "#include \"esp_ble_mesh_networking_api.h\"\n#include \"esp_ble_mesh_tracked.h\"",
+        "count": 1
+      },
+      {
+        "old": "static esp_err_t ble_mesh_model_send_msg(esp_ble_mesh_model_t *model,\n                                         esp_ble_mesh_msg_ctx_t *ctx,\n                                         uint32_t opcode,\n                                         btc_ble_mesh_model_act_t act,\n                                         uint16_t length, uint8_t *data,\n                                         int32_t msg_timeout, bool need_rsp,\n                                         esp_ble_mesh_dev_role_t device_role)\n{",
+        "new": "static esp_err_t ble_mesh_model_send_msg(esp_ble_mesh_model_t *model,\n                                         esp_ble_mesh_msg_ctx_t *ctx,\n                                         uint32_t opcode,\n                                         btc_ble_mesh_model_act_t act,\n                                         uint16_t length, uint8_t *data,\n                                         int32_t msg_timeout, bool need_rsp,\n                                         esp_ble_mesh_dev_role_t device_role, uint32_t ticket)\n{",
+        "count": 1
+      },
+      {
+        "old": "arg.model_send.model = model;",
+        "new": "arg.model_send.ticket = ticket;\n        arg.model_send.model = model;",
+        "count": 1
+      },
+      {
+        "old": "length, data, 0, false, ROLE_NODE);",
+        "new": "length, data, 0, false, ROLE_NODE, 0);",
+        "count": 1
+      },
+      {
+        "old": "length, data, msg_timeout, need_rsp, device_role);",
+        "new": "length, data, msg_timeout, need_rsp, device_role, 0);",
+        "count": 1
+      },
+      {
+        "old": "length, data, 0, false, device_role);",
+        "new": "length, data, 0, false, device_role, 0);",
+        "count": 1
+      },
+      {
+        "old": "esp_err_t esp_ble_mesh_client_model_send_msg(",
+        "new": "esp_err_t esp_ble_mesh_server_model_send_msg_tracked(esp_ble_mesh_model_t *model,\n        esp_ble_mesh_msg_ctx_t *ctx, uint32_t opcode, uint16_t length,\n        uint8_t *data, uint32_t ticket)\n{\n    if (!ticket || !model || !ctx || ctx->net_idx == ESP_BLE_MESH_KEY_UNUSED ||\n        ctx->app_idx == ESP_BLE_MESH_KEY_UNUSED || (length && !data)) {\n        return ESP_ERR_INVALID_ARG;\n    }\n    return ble_mesh_model_send_msg(model, ctx, opcode, BTC_BLE_MESH_ACT_SERVER_MODEL_SEND,\n                                   length, data, 0, false, ROLE_NODE, ticket);\n}\n\nesp_err_t esp_ble_mesh_client_model_send_msg(",
+        "count": 1
+      }
+    ],
+    "esp_ble_mesh/btc/btc_ble_mesh_prov.c": [
+      {
+        "old": "#include \"esp_ble_mesh_networking_api.h\"",
+        "new": "#include \"esp_ble_mesh_networking_api.h\"\n#include \"esp_ble_mesh_tracked.h\"\n\n/* Application overrides this hook. No BTC queue allocation on the end path. */\n__attribute__((weak)) void esp_ble_mesh_tracked_send_event(uint32_t ticket, uint8_t event, int error)\n{\n    (void)ticket; (void)event; (void)error;\n}\nstatic void pump_tracked_end(int error, void *user_data)\n{\n    esp_ble_mesh_tracked_send_event((uint32_t)(uintptr_t)user_data, ESP_BLE_MESH_TRACKED_SAR_ENDED, error);\n}\nstatic const struct bt_mesh_send_cb pump_tracked_callbacks = { .end = pump_tracked_end };\n",
+        "count": 1
+      },
+      {
+        "old": "    case BTC_BLE_MESH_ACT_SERVER_MODEL_SEND: {\n        /* arg->model_send.length contains opcode & payload, plus extra 4-bytes TransMIC */\n        struct net_buf_simple *buf = bt_mesh_alloc_buf(arg->model_send.length + BLE_MESH_MIC_SHORT);\n        if (!buf) {\n            BT_ERR(\"%s, Out of memory\", __func__);\n            btc_ble_mesh_model_send_comp_cb(arg->model_send.model, arg->model_send.ctx,\n                                            arg->model_send.opcode, -ENOMEM);\n            break;\n        }\n\n        net_buf_simple_add_mem(buf, arg->model_send.data, arg->model_send.length);\n\n        err = bt_mesh_model_send((struct bt_mesh_model *)arg->model_send.model,\n                                 (struct bt_mesh_msg_ctx *)arg->model_send.ctx,\n                                 buf, NULL, NULL);\n        bt_mesh_free_buf(buf);\n        btc_ble_mesh_model_send_comp_cb(arg->model_send.model, arg->model_send.ctx,\n                                        arg->model_send.opcode, err);\n        break;\n    }\n",
+        "new": "    case BTC_BLE_MESH_ACT_SERVER_MODEL_SEND: {\n        /* arg->model_send.length contains opcode & payload, plus extra 4-bytes TransMIC */\n        struct net_buf_simple *buf = bt_mesh_alloc_buf(arg->model_send.length + BLE_MESH_MIC_SHORT);\n        if (!buf) {\n            BT_ERR(\"%s, Out of memory\", __func__);\n            if (arg->model_send.ticket) {\n                esp_ble_mesh_tracked_send_event(arg->model_send.ticket, ESP_BLE_MESH_TRACKED_REJECTED, -ENOMEM);\n            } else {\n                btc_ble_mesh_model_send_comp_cb(arg->model_send.model, arg->model_send.ctx,\n                                                arg->model_send.opcode, -ENOMEM);\n            }\n            break;\n        }\n\n        net_buf_simple_add_mem(buf, arg->model_send.data, arg->model_send.length);\n\n        err = bt_mesh_model_send((struct bt_mesh_model *)arg->model_send.model,\n                                 (struct bt_mesh_msg_ctx *)arg->model_send.ctx,\n                                 buf, arg->model_send.ticket ? &pump_tracked_callbacks : NULL,\n                                 (void *)(uintptr_t)arg->model_send.ticket);\n        bt_mesh_free_buf(buf);\n        if (arg->model_send.ticket) {\n            esp_ble_mesh_tracked_send_event(arg->model_send.ticket,\n                    err ? ESP_BLE_MESH_TRACKED_REJECTED : ESP_BLE_MESH_TRACKED_ACCEPTED, err);\n        } else {\n            btc_ble_mesh_model_send_comp_cb(arg->model_send.model, arg->model_send.ctx,\n                                            arg->model_send.opcode, err);\n        }\n        break;\n    }\n",
+        "count": 1
+      },
+      {
+        "old": "    case BTC_BLE_MESH_ACT_SERVER_MODEL_SEND: {\n        /* arg->model_send.length contains opcode & payload, plus extra 4-bytes TransMIC */",
+        "new": "    case BTC_BLE_MESH_ACT_SERVER_MODEL_SEND: {\n        /* A failed BTC deep copy must never reach memcpy/the mesh core. */\n        if (!arg->model_send.ctx || (arg->model_send.length && !arg->model_send.data)) {\n            if (arg->model_send.ticket) {\n                esp_ble_mesh_tracked_send_event(arg->model_send.ticket, ESP_BLE_MESH_TRACKED_REJECTED, -ENOMEM);\n            } else {\n                btc_ble_mesh_model_send_comp_cb(arg->model_send.model, arg->model_send.ctx,\n                                                arg->model_send.opcode, -ENOMEM);\n            }\n            break;\n        }\n        /* arg->model_send.length contains opcode & payload, plus extra 4-bytes TransMIC */",
+        "count": 1
+      },
+      {
+        "old": "    case BTC_BLE_MESH_ACT_CLIENT_MODEL_SEND: {\n        /* arg->model_send.length",
+        "new": "    case BTC_BLE_MESH_ACT_CLIENT_MODEL_SEND: {\n        if (!arg->model_send.ctx || (arg->model_send.length && !arg->model_send.data)) {\n            btc_ble_mesh_model_send_comp_cb(arg->model_send.model, arg->model_send.ctx,\n                                            arg->model_send.opcode, -ENOMEM);\n            break;\n        }\n        /* arg->model_send.length",
+        "count": 1
+      }
+    ],
+    "esp_ble_mesh/btc/include/btc_ble_mesh_prov.h": [
+      {
+        "old": "        int32_t msg_timeout;\n    } model_send;",
+        "new": "        int32_t msg_timeout;\n        uint32_t ticket; /* 0 preserves the legacy API behavior */\n    } model_send;",
+        "count": 1
+      }
+    ]
+  },
+  "additions": {
+    "esp_ble_mesh/api/core/include/esp_ble_mesh_tracked.h": "/* Project SDK extension, patch version pump-sar-1. */\n#pragma once\n#include \"esp_ble_mesh_networking_api.h\"\n#ifdef __cplusplus\nextern \"C\" {\n#endif\n#define ESP_BLE_MESH_PUMP_TRACKED_VERSION 1\n#define ESP_BLE_MESH_TRACKED_ACCEPTED 1\n#define ESP_BLE_MESH_TRACKED_REJECTED 2\n#define ESP_BLE_MESH_TRACKED_SAR_ENDED 3\n/* Return ESP_OK means BTC queued the copy. It never means SAR ended. */\nesp_err_t esp_ble_mesh_server_model_send_msg_tracked(esp_ble_mesh_model_t *model,\n    esp_ble_mesh_msg_ctx_t *ctx, uint32_t opcode, uint16_t length, uint8_t *data,\n    uint32_t ticket);\n/* Nonblocking hook, may run before API return or ACCEPTED. ticket is never reused.\n * REJECTED means no live local SAR. SAR_ENDED means transport freed the context.\n * A reset can omit SAR_ENDED: application must freeze, never time-release. */\nvoid esp_ble_mesh_tracked_send_event(uint32_t ticket, uint8_t event, int error);\n#ifdef __cplusplus\n}\n#endif\n"
+  }
+}

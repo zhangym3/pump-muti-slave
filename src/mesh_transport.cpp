@@ -8,6 +8,8 @@
 #include "esp_ble_mesh_common_api.h"
 #include "esp_ble_mesh_provisioning_api.h"
 #include "esp_ble_mesh_networking_api.h"
+#include "esp_ble_mesh_tracked.h"
+#include "esp_timer.h"
 #include "esp_ble_mesh_config_model_api.h"
 #include "esp_ble_mesh_local_data_operation_api.h"
 #include "freertos/task.h"
@@ -36,6 +38,8 @@ esp_ble_mesh_model_op_t operations[] = {
   {ESP_BLE_MESH_MODEL_OP_3(0xCD, CompanyId), 14, 0},
   {ESP_BLE_MESH_MODEL_OP_3(0xCE, CompanyId), 13, 0},
   {ESP_BLE_MESH_MODEL_OP_3(0xCF, CompanyId), 10, 0},
+  {ESP_BLE_MESH_MODEL_OP_3(0xD0, CompanyId), 4, 0},
+  {ESP_BLE_MESH_MODEL_OP_3(0xD1, CompanyId), 12, 0},
   ESP_BLE_MESH_MODEL_OP_END
 };
 esp_ble_mesh_model_t sigModels[] = { ESP_BLE_MESH_MODEL_CFG_SRV(&config) };
@@ -70,7 +74,7 @@ void modelCb(esp_ble_mesh_model_cb_event_t event, esp_ble_mesh_model_cb_param_t 
   if (!m.ctx || m.ctx->net_idx != 0 || m.ctx->app_idx != 0 ||
       m.length > sizeof(Packet::bytes) || (m.opcode & 0xFFFF) != CompanyId) return;
   const uint8_t code = uint8_t(m.opcode >> 16);
-  if (code < uint8_t(Op::Prepare) || code > uint8_t(Op::CommandReply)) return;
+  if (code < uint8_t(Op::Prepare) || code > uint8_t(Op::Capabilities)) return;
   auto in = packet(Op(code), m.ctx->addr);
   in.size = uint8_t(m.length);
   memcpy(in.bytes, m.msg, in.size);
@@ -87,9 +91,7 @@ bool MeshTransport::init(uint16_t masterAddress) {
   master_ = masterAddress;
   rx_ = xQueueCreate(48, sizeof(Packet));
   urgentRx_ = xQueueCreate(12, sizeof(Packet));
-  tx_ = xQueueCreate(48, sizeof(Packet));
-  urgentTx_ = xQueueCreate(12, sizeof(Packet));
-  if (!rx_ || !urgentRx_ || !tx_ || !urgentTx_) return false;
+  if (!rx_ || !urgentRx_) return false;
   if (esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT) != ESP_OK) return false;
   esp_bt_controller_config_t bt = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
   if (esp_bt_controller_init(&bt) != ESP_OK || esp_bt_controller_enable(ESP_BT_MODE_BLE) != ESP_OK ||
@@ -133,10 +135,36 @@ bool MeshTransport::ready() const {
 }
 uint16_t MeshTransport::address() const { return esp_ble_mesh_get_primary_element_address(); }
 bool MeshTransport::send(const Packet &p) {
-  if (!ready() || !p.peer || p.size > sizeof(p.bytes)) return false;
-  const bool ok = xQueueSend(urgent(p) ? urgentTx_ : tx_, &p, 0) == pdTRUE;
-  if (!ok && urgent(p)) overflow_ = true;
+  if (!ready()) return false;
+  portENTER_CRITICAL(&txLock_);
+  const bool ok = tx_.enqueue(p, uint32_t(esp_timer_get_time()/1000));
+  portEXIT_CRITICAL(&txLock_);
   return ok;
+}
+void MeshTransport::fence(JobKey job) {
+  portENTER_CRITICAL(&txLock_); tx_.fence(job); portEXIT_CRITICAL(&txLock_);
+}
+bool MeshTransport::healthy() const {
+  portENTER_CRITICAL(&txLock_); const bool ok = tx_.healthy(); portEXIT_CRITICAL(&txLock_); return ok;
+}
+MeshTxGovernor::Metrics MeshTransport::metrics() const {
+  portENTER_CRITICAL(&txLock_); const auto m = tx_.metrics(); portEXIT_CRITICAL(&txLock_); return m;
+}
+MeshTxGovernor::Diagnostics MeshTransport::diagnostics() const {
+  portENTER_CRITICAL(&txLock_);
+  const auto d = tx_.diagnostics(uint32_t(esp_timer_get_time()/1000));
+  portEXIT_CRITICAL(&txLock_); return d;
+}
+bool MeshTransport::takeSubmission(MeshSubmission &out) {
+  portENTER_CRITICAL(&txLock_);
+  const bool ok = tx_.collect(uint32_t(esp_timer_get_time()/1000), out);
+  portEXIT_CRITICAL(&txLock_); return ok;
+}
+void MeshTransport::trackedEvent(uint32_t ticket, uint8_t event, int error) {
+  portENTER_CRITICAL(&txLock_); tx_.event(ticket,event,error,uint32_t(esp_timer_get_time()/1000)); portEXIT_CRITICAL(&txLock_);
+}
+extern "C" void esp_ble_mesh_tracked_send_event(uint32_t ticket, uint8_t event, int error) {
+  if (instance) instance->trackedEvent(ticket,event,error);
 }
 void MeshTransport::incoming(const Packet &p) {
   // A slave accepts application traffic only from its persisted master address.
@@ -148,17 +176,32 @@ bool MeshTransport::receive(Packet &p) {
 }
 void MeshTransport::worker() {
   for (;;) {
-    Packet p;
-    if (xQueueReceive(urgentTx_, &p, 0) != pdTRUE && xQueueReceive(tx_, &p, pdMS_TO_TICKS(10)) != pdTRUE) continue;
+    MeshTxGovernor::Dispatch d;
+    bool dispatch = false;
     if (ready()) {
-      esp_ble_mesh_msg_ctx_t ctx{};
-      ctx.net_idx = 0; ctx.app_idx = 0; ctx.addr = p.peer; ctx.send_ttl = 3;
-      const auto err = esp_ble_mesh_server_model_send_msg(&vendorModels[0], &ctx,
-        ESP_BLE_MESH_MODEL_OP_3(uint8_t(p.op), CompanyId), p.size, p.bytes);
-      if (err != ESP_OK) ESP_LOGW("mesh", "send op=%02x err=%s", uint8_t(p.op), esp_err_to_name(err));
+      // This lock is the commit point shared with fence(). SDK/BTC may block;
+      // an already committed dispatch remains tracked across a later stop.
+      portENTER_CRITICAL(&txLock_);
+      dispatch = tx_.next(uint32_t(esp_timer_get_time()/1000), d);
+      portEXIT_CRITICAL(&txLock_);
     }
-    vTaskDelay(pdMS_TO_TICKS(20));
+    if (dispatch) {
+      esp_ble_mesh_msg_ctx_t ctx{};
+      ctx.net_idx=0; ctx.app_idx=0; ctx.addr=d.packet.peer; ctx.send_ttl=3;
+      const auto err = esp_ble_mesh_server_model_send_msg_tracked(&vendorModels[0], &ctx,
+        ESP_BLE_MESH_MODEL_OP_3(uint8_t(d.packet.op), CompanyId), d.packet.size, d.packet.bytes, d.ticket);
+      if (err != ESP_OK) trackedEvent(d.ticket, ESP_BLE_MESH_TRACKED_REJECTED, err);
+    }
+    for (unsigned i=0;i<4;++i) {
+      MeshTxGovernor::Trace t;
+      portENTER_CRITICAL(&txLock_); const bool found=tx_.takeTrace(t); portEXIT_CRITICAL(&txLock_);
+      if (!found) break;
+      ESP_LOGI("mesh_tx", "t=%lu ticket=%lu peer=%04x op=%02x event=%u job=%lu:%lu seq=%lu rev=%lu issued=%lu age=%lu queued=%lu wait=%lu seg=%u err=%d",
+        (unsigned long)t.at,(unsigned long)t.ticket,t.peer,t.op,t.event,(unsigned long)t.job.epoch,
+        (unsigned long)t.job.id,(unsigned long)t.sequence,(unsigned long)t.revision,(unsigned long)t.issuedAt,
+        (unsigned long)(t.at-t.issuedAt),(unsigned long)t.queuedAt,(unsigned long)(t.issuedAt-t.queuedAt),t.segmented,t.error);
+    }
+    vTaskDelay(pdMS_TO_TICKS(5));
   }
 }
 }
-
