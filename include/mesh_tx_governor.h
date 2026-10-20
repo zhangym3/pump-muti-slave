@@ -33,6 +33,15 @@ class MeshTxGovernor {
   explicit MeshTxGovernor(uint8_t sarLimit = 2) : sarLimit_(sarLimit) {}
   bool enqueue(const Packet &p, uint32_t now) {
     if (!p.peer || p.size > sizeof(p.bytes)) return false;
+    if (p.op == Op::Lease && (!p.context.valid() || p.size != 8)) return false;
+    if (scope_.valid() && authorizes(p) && key(p) != scope_) return false;
+    // Only identical successful command replies already owned by the SDK merge.
+    if (p.op == Op::PrepareOK || p.op == Op::StartOK)
+      for (const auto &v:slots_) if (v.used && sameIntent(v.p,p)) { ++metrics_.merged; return true; }
+    if (p.op == Op::CommandAck && p.size == 10) {
+      const Op ok = p.bytes[8] == uint8_t(Op::Prepare) ? Op::PrepareOK : Op::StartOK;
+      retire(p.peer,key(p),ok);
+    }
     // A fault never reopens the business path. Only freshly constructed,
     // non-authorizing diagnostics may resume after all old tickets settle.
     if (frozen_ && (!diagnosticReady(now) || !diagnostic(p))) return false;
@@ -51,7 +60,7 @@ class MeshTxGovernor {
       }
       if (sameIntent(old.p, p)) {
         // Repeated enqueue never slides a critical deadline.
-        if (p.op != Op::LeaseAck || p.bytes[12] == uint8_t(Reply::Ok)) old.p = p;
+        if (p.op != Op::LeaseAck || p.size != 8 || leaseSequence(p) > leaseSequence(old.p)) old.p = p;
         ++metrics_.merged; return true;
       }
     }
@@ -62,6 +71,22 @@ class MeshTxGovernor {
     pending_[free] = {p, now, ++order_, true};
     if (used + 1 > metrics_.peakPending) metrics_.peakPending = uint8_t(used + 1);
     return true;
+  }
+  // Called under the same lock as next(): no old authorization can commit
+  // after the floor is captured; SDK-owned tickets remain real and tracked.
+  bool beginLeaseScope(JobKey job, uint32_t &floor) {
+    if (!job.valid() || frozen_ || leaseSeq_ == UINT32_MAX) return false;
+    for (auto &v:pending_) if (v.used && authorizes(v.p)) v.used=false;
+    scope_=job; floor=leaseSeq_+1; return true;
+  }
+  enum class Admission { Accepted, Busy, Failed };
+  Admission prepare(const Packet &p, uint32_t now) {
+    if (!healthy()) return Admission::Failed;
+    for (const auto &v:pending_) if (v.used && v.p.op == Op::Prepare) return Admission::Busy;
+    return enqueue(p,now) ? Admission::Accepted : Admission::Failed;
+  }
+  void retire(uint16_t peer, JobKey job, Op op) {
+    for (auto &v:pending_) if (v.used && v.p.peer==peer && key(v.p)==job && v.p.op==op) v.used=false;
   }
   void fence(JobKey job) {
     fenced_ = job;
@@ -114,7 +139,7 @@ class MeshTxGovernor {
     s.p = v.p; s.issuedAt = now; s.queuedAt = v.queuedAt; s.id = ++ticket_; s.used = true; s.segmented = segmented(v.p);
     if (s.p.op == Op::Lease) {
       const uint32_t seq = ++leaseSeq_;
-      for (unsigned i=0; i<4; ++i) s.p.bytes[8+i] = uint8_t(seq >> (8*i));
+      for (unsigned i=0; i<4; ++i) s.p.bytes[4+i] = uint8_t(seq >> (8*i));
     }
     v.used = false; ++metrics_.submitted;
     if (s.segmented && sar + 1 > metrics_.peakSar) metrics_.peakSar = uint8_t(sar + 1);
@@ -187,8 +212,14 @@ class MeshTxGovernor {
   size_t inFlight() const { size_t n=0; for (const auto &s : slots_) n += s.used; return n; }
   size_t queued() const { size_t n=0; for (const auto &s : pending_) n += s.used; return n; }
   static bool segmented(const Packet &p) { return p.size > 8; }
-  static JobKey key(const Packet &p) { Reader r{p}; return r.key(); }
+  static JobKey key(const Packet &p) {
+    if (p.op == Op::Lease || p.op == Op::LeaseAck) return p.context;
+    Reader r{p}; return r.key();
+  }
  private:
+#ifdef PUMP_HOST_TEST
+  friend struct GovernorTestAccess;
+#endif
   bool diagnosticReady(uint32_t now) const {
     return frozen_ && !restartRequired_ && !inFlight() && elapsed(now,lastFault_.at,backoffMs_);
   }
@@ -206,7 +237,8 @@ class MeshTxGovernor {
       case Op::Result: return p.size == 27 && !(p.bytes[26] & 1) &&
         (p.bytes[24] == uint8_t(Phase::Done) || p.bytes[24] == uint8_t(Phase::Fault));
       case Op::CommandAck: return p.size == 10 && p.bytes[9] > uint8_t(Reply::Ok) && p.bytes[9] <= uint8_t(Reply::Unknown);
-      case Op::LeaseAck: return p.size == 13 && p.bytes[12] > uint8_t(Reply::Ok) && p.bytes[12] <= uint8_t(Reply::Unknown);
+      case Op::LeaseAck: return p.size == 9 && p.bytes[8] > uint8_t(Reply::Ok) && p.bytes[8] <= uint8_t(Reply::Unknown);
+      case Op::TargetClosed: case Op::TargetClosedAck: return p.size == 8;
       case Op::CommissionReply: return p.size == 14 && p.bytes[4] > uint8_t(Reply::Ok) && p.bytes[4] <= uint8_t(Reply::Unknown);
       default: return false;
     }
@@ -218,13 +250,14 @@ class MeshTxGovernor {
   static bool authorizes(const Packet &p) { return p.op == Op::Prepare || p.op == Op::Start || p.op == Op::Lease; }
   static bool critical(const Packet &p) {
       return authorizes(p) || p.op == Op::Close || p.op == Op::LeaseAck ||
-      p.op == Op::Result || p.op == Op::ResultAck || p.op == Op::CommandAck;
+      p.op == Op::Result || p.op == Op::ResultAck || p.op == Op::CommandAck ||
+      p.op == Op::TargetClosed || p.op == Op::TargetClosedAck || p.op == Op::PrepareOK || p.op == Op::StartOK;
   }
   static unsigned priority(const Packet &p) {
-    if (p.op == Op::Close) return 0;
+    if (p.op == Op::Close || p.op == Op::TargetClosed || p.op == Op::TargetClosedAck) return 0;
     if (p.op == Op::Lease || p.op == Op::LeaseAck) return 1;
     if (p.op == Op::Result || p.op == Op::ResultAck) return 1;
-    if (p.op == Op::CommandAck) return 2;
+    if (p.op == Op::CommandAck || p.op == Op::PrepareOK || p.op == Op::StartOK) return 2;
     if (p.op == Op::Prepare || p.op == Op::Start) return 3;
     return 4;
   }
@@ -239,8 +272,7 @@ class MeshTxGovernor {
     }
     if (a.op == Op::Lease) return key(a) == key(b);
     if (a.op == Op::LeaseAck) {
-      if (a.size == 13 && b.size == 13 && key(a) == key(b) &&
-          a.bytes[12] == uint8_t(Reply::Ok) && b.bytes[12] == uint8_t(Reply::Ok)) return true;
+      if (a.size == 8 && b.size == 8 && a.context.valid() && key(a) == key(b)) return true;
     }
     return a.size == b.size && !memcmp(a.bytes, b.bytes, a.size);
   }
@@ -263,8 +295,8 @@ class MeshTxGovernor {
   };
   void trace(const Slot &s, uint8_t event, int error, uint32_t now) {
     if (traceCount_ == 64) { ++metrics_.traceLost; return; }
-    Reader r{s.p}; const auto job=r.key();
-    const uint32_t seq = s.p.op == Op::Lease || s.p.op == Op::LeaseAck ? r.u32() : 0;
+    Reader r{s.p}; const auto job=key(s.p);
+    const uint32_t seq = s.p.op == Op::Lease || s.p.op == Op::LeaseAck ? leaseSequence(s.p) : 0;
     uint32_t revision=0;
     if (s.p.op==Op::Result || s.p.op==Op::ResultAck) {
       r.at=s.p.op==Op::Result ? 20 : 8; revision=r.u32();
@@ -275,7 +307,7 @@ class MeshTxGovernor {
   Intent pending_[Pending]; Slot slots_[Tickets]; Metrics metrics_;
   Trace traces_[64]; uint32_t traceRead_ = 0, traceWrite_ = 0; uint8_t traceCount_ = 0;
   uint8_t sarLimit_; uint32_t ticket_ = 0, leaseSeq_ = 0, order_ = 0;
-  JobKey fenced_; bool frozen_ = false, restartRequired_ = false;
+  JobKey fenced_, scope_; bool frozen_ = false, restartRequired_ = false;
   Fault firstFault_, lastFault_; uint32_t backoffMs_ = 0;
 };
 }

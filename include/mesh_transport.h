@@ -20,6 +20,7 @@ class MeshTransport final {
   void worker();
   bool takeSubmission(MeshSubmission &out);
   void fence(JobKey job);
+  void retire(uint16_t peer, JobKey job, Op op);
   bool healthy() const;
   MeshTxGovernor::Metrics metrics() const;
   MeshTxGovernor::Diagnostics diagnostics() const;

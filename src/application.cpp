@@ -1,6 +1,8 @@
 #include "application.h"
 #include "mesh_tx_diagnostics.h"
 #include "esp_log.h"
+#include "esp_system.h"
+#include "esp_heap_caps.h"
 #include "esp_task_wdt.h"
 #include "freertos/task.h"
 #include <cstdio>
@@ -25,19 +27,13 @@ bool Application::status(bool force) {
   return mesh_.send(packetOut);
 }
 
-void Application::commandAck(JobKey key, Op command, Reply reply) {
-  auto packetOut = packet(Op::CommandAck, store_.state().master);
-  Writer writer{packetOut}; writer.key(key); writer.u8(uint8_t(command)); writer.u8(uint8_t(reply));
-  mesh_.send(packetOut);
-  if (reply != Reply::Ok) {
-    char line[64];
-    snprintf(line, sizeof(line), "JOB_REJECT %s", replyName(reply));
-    gateway_.publish(line);
-  }
-}
-
 void Application::incoming(const Packet &packetIn, uint32_t now) {
   if (packetIn.peer != store_.state().master) return;
+  if (!controlFormat(packetIn)) return;
+  const auto retire=[&](uint16_t peer,JobKey key,Op op) { mesh_.retire(peer,key,op); };
+  if (session_.handle(packetIn,now,mesh_.healthy(),storageHealthy_,[&](const Packet &p) { return mesh_.send(p); },retire)) {
+    hallDiagnostics(nowMs()); return;
+  }
   Reader reader{packetIn};
   switch (packetIn.op) {
     case Op::CapabilitiesGet: {
@@ -88,44 +84,6 @@ void Application::incoming(const Packet &packetIn, uint32_t now) {
       gateway_.publish(line);
       break;
     }
-    case Op::Prepare: {
-      Dose dose;
-      dose.key = reader.key(); dose.ml = reader.u32(); dose.pulses = reader.u32();
-      dose.k = reader.u32(); dose.version = reader.u32(); dose.maxMs = reader.u32();
-      dose.speedFactorPermille = reader.u16(); dose.leaseMs = reader.u32();
-      const uint8_t flags = reader.u8();
-      if (!reader.done() || flags) return;
-      const Reply result = !mesh_.healthy() ? Reply::NotReady :
-        storageHealthy_ ? valve_.prepare(dose, now) : Reply::Storage;
-      commandAck(dose.key, Op::Prepare, result);
-      break;
-    }
-    case Op::Start: {
-      const JobKey key = reader.key();
-      if (!reader.done()) return;
-      const Reply result = mesh_.healthy() ? valve_.start(key, now) : Reply::NotReady;
-      // Capture START before another command in this receive batch can close it.
-      hallDiagnostics(nowMs());
-      commandAck(key, Op::Start, result);
-      break;
-    }
-    case Op::Lease: {
-      const JobKey key = reader.key();
-      const uint32_t sequence = reader.u32();
-      if (!reader.done() || !key.valid() || !sequence) break;
-      // Target closure can race an already committed renewal. Report the
-      // physical closed state; it is not a new lease proof or a rejection of
-      // an open valve's authorization. Fault closures still return rejection.
-      const auto current = valve_.status();
-      if (current.key == key && !current.valveCommand && current.reason == Reason::Target &&
-          (current.phase == Phase::Settling || current.phase == Phase::Done)) {
-        status(true); break;
-      }
-      const Reply result = mesh_.healthy() ? valve_.lease(key, sequence, now) : Reply::NotReady;
-      auto ack = packet(Op::LeaseAck, store_.state().master);
-      Writer w{ack}; w.key(key); w.u32(sequence); w.u8(uint8_t(result)); mesh_.send(ack);
-      break;
-    }
     case Op::Close: {
       const JobKey key = reader.key();
       const Reason reason = Reason(reader.u8());
@@ -152,6 +110,7 @@ void Application::incoming(const Packet &packetIn, uint32_t now) {
       const uint32_t revision = reader.u32();
       if (reader.done() && key == valve_.status().key && revision == valve_.status().revision) {
         ackedKey_ = key; ackedRevision_ = revision;
+        session_.resultAck(packetIn.peer,key,retire);
       }
       break;
     }
@@ -277,6 +236,7 @@ void Application::command(CommandLine &line, uint32_t) {
 }
 
 void Application::periodic(uint32_t now) {
+  session_.poll(store_.state().master,(mesh_.address()-2)%5,now,[&](const Packet &p) { return mesh_.send(p); });
   const auto current = valve_.status();
   const bool final = current.phase == Phase::Done || current.phase == Phase::Fault;
   if (final && (current.key != savedKey_ || current.revision != savedRevision_) && current.key.valid()) {
@@ -334,8 +294,13 @@ void Application::run() {
         mesh_.healthy(),(unsigned long)m.submitted,(unsigned long)m.ended,(unsigned long)m.merged,(unsigned long)m.expired,
         (unsigned long)m.faults,(unsigned long)m.helloTimeouts,m.peakSar,m.peakPending,(unsigned long)m.maxSarMs,(unsigned long)maxTick,(unsigned long)m.traceLost);
       publishMeshDiagnostics(mesh_.diagnostics(),mesh_.healthy(),[](const char *line) { ESP_LOGI("mesh_state","%s",line); });
+      ESP_LOGI("runtime_mem", "heap_free=%lu heap_min=%lu largest_free=%lu app_stack_min_bytes=%lu",
+        (unsigned long)esp_get_free_heap_size(),(unsigned long)esp_get_minimum_free_heap_size(),
+        (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+        (unsigned long)uxTaskGetStackHighWaterMark(nullptr));
     }
     valve_.tick(now);
+    session_.poll(store_.state().master,(mesh_.address()-2)%5,now,[&](const Packet &p) { return mesh_.send(p); });
     // Preserve a terminal snapshot before PREPARE can replace the completed job.
     hallDiagnostics(nowMs());
     MeshSubmission sent; while (mesh_.takeSubmission(sent)) {}

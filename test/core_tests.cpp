@@ -2,6 +2,7 @@
 #include "control_request.h"
 #include <cstdio>
 #include <cstdlib>
+#include <initializer_list>
 using namespace pump;
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #x); std::exit(1); } } while (false)
 struct FakeValve : ValveIO {
@@ -101,4 +102,20 @@ void transport_lock() {
     if(stopped.key.valid()) CHECK(c.status().key==stopped.key);
   }
 }
-int main() { target_and_tail(); validation_and_calibration(); commission_gate(); leases_and_interlock(); wire_contract_vectors(); transport_lock(); std::puts("PASS transport fault locks idle/prepared/open/terminal control until controlled restart"); std::puts("slave flow tests passed"); }
+void prepared_deadline_and_floor() {
+  for(uint32_t age:{19999U,20000U}) {
+    FakeValve io;FlowJobController c(io,config());c.boot({});
+    auto d=dose();d.leaseFloor=0;CHECK(c.prepare(d,100)==Reply::Invalid && !io.writes);
+    d.leaseFloor=0x80000000U;CHECK(c.prepare(d,100)==Reply::Ok);
+    auto conflict=d;conflict.leaseFloor++;CHECK(c.prepare(conflict,110)==Reply::Conflict);
+    CHECK(c.prepare(d,150)==Reply::Ok); // Does not slide the prepared deadline.
+    CHECK(c.start(d.key,100+age)==(age<20000?Reply::Ok:Reply::NotReady));
+    CHECK(io.on==(age<20000));
+    if(io.on) {
+      CHECK(c.compactLease(d.key.epoch,d.leaseFloor-1,20100)==Reply::Stale);
+      CHECK(c.compactLease(d.key.epoch,d.leaseFloor,20100)==Reply::Ok);
+    }
+  }
+  std::puts("PASS prepared 19999/20000ms boundary, non-sliding duplicate and lease floor validation");
+}
+int main() { prepared_deadline_and_floor(); target_and_tail(); validation_and_calibration(); commission_gate(); leases_and_interlock(); wire_contract_vectors(); transport_lock(); std::puts("PASS transport fault locks idle/prepared/open/terminal control until controlled restart"); std::puts("slave flow tests passed"); }

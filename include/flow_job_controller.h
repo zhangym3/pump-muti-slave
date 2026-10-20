@@ -5,13 +5,14 @@ struct FlowReading { uint32_t pulses = 0, lastMs = 0; };
 struct ValveConfig {
   bool commissioned = false;
   uint32_t k = 5880, version = 1, preclose = 0;
-  uint32_t startWaitMs = 5000, noFlowMs = 1500, prepareMs = 10000;
+  uint32_t startWaitMs = 5000, noFlowMs = 1500, prepareMs = 20000;
   uint32_t quietMs = 500, settleLimitMs = 3000, maxRunMs = 240000;
   uint32_t leaseMs = LeaseMs;
 };
 struct Dose {
   JobKey key;
   uint32_t ml = 0, pulses = 0, k = 0, version = 0, maxMs = 0, leaseMs = LeaseMs;
+  uint32_t leaseFloor = 1;
   uint16_t speedFactorPermille = SpeedHighPermille;
 };
 class ValveIO {
@@ -30,6 +31,7 @@ class FlowJobController {
   void restore(const ValveStatus &result);
   Reply prepare(const Dose &dose, uint32_t now);
   Reply start(JobKey key, uint32_t now);
+  Reply compactLease(uint32_t epoch, uint32_t sequence, uint32_t now);
   Reply lease(JobKey key, uint32_t sequence, uint32_t now);
   void close(JobKey key, Reason reason, uint32_t now);
   void emergency(Reason reason, uint32_t now);

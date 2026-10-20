@@ -42,7 +42,7 @@ Reply FlowJobController::prepare(const Dose &d, uint32_t now) {
   if (d.key == s_.key) {
     if (d.ml != dose_.ml || d.pulses != dose_.pulses || d.k != dose_.k ||
         d.version != dose_.version || d.maxMs != dose_.maxMs ||
-        d.leaseMs != dose_.leaseMs || d.speedFactorPermille != dose_.speedFactorPermille) return Reply::Conflict;
+        d.leaseFloor != dose_.leaseFloor || d.leaseMs != dose_.leaseMs || d.speedFactorPermille != dose_.speedFactorPermille) return Reply::Conflict;
     return s_.phase >= Phase::Prepared ? Reply::Ok : Reply::Stale;
   }
   if (!d.key.newer(fence_)) return Reply::Stale;
@@ -50,7 +50,7 @@ Reply FlowJobController::prepare(const Dose &d, uint32_t now) {
   if (storageFault_) return Reply::Storage;
   if (!cfg_.commissioned || !io_.interlock()) return Reply::NotReady;
   uint32_t expected = 0;
-  if (!validSpeedFactor(d.speedFactorPermille) || !d.leaseMs || d.leaseMs > 60000 ||
+  if (!d.leaseFloor || !validSpeedFactor(d.speedFactorPermille) || !d.leaseMs || d.leaseMs > 60000 ||
       !targetPulses(d.ml, d.k, expected) || d.pulses != expected || d.k != cfg_.k ||
       d.version != cfg_.version || !d.maxMs || d.maxMs > cfg_.maxRunMs ||
       cfg_.preclose >= d.pulses) return Reply::Invalid;
@@ -72,6 +72,10 @@ Reply FlowJobController::start(JobKey key, uint32_t now) {
   // Counting starts before energising; residual-pressure flow belongs to this dose.
   io_.valve(true); change(Phase::Opening); return Reply::Ok;
 }
+Reply FlowJobController::compactLease(uint32_t epoch, uint32_t seq, uint32_t now) {
+  if (epoch != s_.key.epoch) return Reply::Stale;
+  return lease(s_.key,seq,now);
+}
 Reply FlowJobController::lease(JobKey key, uint32_t seq, uint32_t now) {
   if (transportFault_) return Reply::NotReady;
   if (key != s_.key || !s_.valveCommand) return Reply::Stale;
@@ -79,8 +83,9 @@ Reply FlowJobController::lease(JobKey key, uint32_t seq, uint32_t now) {
   if (elapsed(now, leaseAt_, dose_.leaseMs)) { shut(Reason::Lease, now); return Reply::Stale; }
   // Retransmitted multicast renewals are acknowledged without extending the
   // lease a second time; this makes reply loss safe and deterministic.
+  if (!seq || seq < dose_.leaseFloor) return Reply::Stale;
   if (seq == leaseSeq_) return Reply::Ok;
-  if (!serialNewer(seq, leaseSeq_)) return Reply::Stale;
+  if (seq < leaseSeq_) return Reply::Stale;
   leaseSeq_ = seq; leaseAt_ = now; return Reply::Ok;
 }
 void FlowJobController::shut(Reason reason, uint32_t now) {
