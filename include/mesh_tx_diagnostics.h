@@ -15,13 +15,13 @@ void publishMeshDiagnostics(const MeshTxGovernor::Diagnostics &d, bool healthy, 
     if (f.reason == MeshTxGovernor::FaultReason::None) return;
     const auto op=f.packet.op;
     const bool keyed = op==Op::Prepare || op==Op::Start || op==Op::Lease || op==Op::Close ||
-      op==Op::StatusGet || op==Op::Status || op==Op::Summary || op==Op::EventAck ||
-      op==Op::LeaseAck || op==Op::CommandReply;
+      op==Op::ResultQuery || op==Op::Result || op==Op::ResultAck ||
+      op==Op::LeaseAck || op==Op::CommandAck;
     Reader r{f.packet}; const auto job=keyed ? r.key() : JobKey{};
     uint32_t sequence=0, revision=0;
     if (op==Op::Lease || op==Op::LeaseAck) sequence=r.u32();
-    if (op==Op::Status || op==Op::Summary || op==Op::EventAck) {
-      r.at=op==Op::Status ? 20 : op==Op::Summary ? 12 : 8; revision=r.u32();
+    if (op==Op::Result || op==Op::ResultAck) {
+      r.at=op==Op::Result ? 20 : 8; revision=r.u32();
     }
     snprintf(line,sizeof(line),"MESH_FAULT first=%u reason=%s t=%lu ticket=%lu peer=%04x op=%02x err=%d job=%lu:%lu",
       first,MeshTxGovernor::faultName(f.reason),(unsigned long)f.at,(unsigned long)f.ticket,

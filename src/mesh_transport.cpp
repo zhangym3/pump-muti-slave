@@ -22,17 +22,17 @@ MeshTransport *instance = nullptr;
 uint8_t uuid[16] = {0xDD, 0xDD, 0x50, 0x4D};
 esp_ble_mesh_cfg_srv_t config;
 esp_ble_mesh_model_op_t operations[] = {
-  {ESP_BLE_MESH_MODEL_OP_3(0xC0, CompanyId), 28, 0},
+  {ESP_BLE_MESH_MODEL_OP_3(0xC0, CompanyId), 35, 0},
   {ESP_BLE_MESH_MODEL_OP_3(0xC1, CompanyId), 8, 0},
   {ESP_BLE_MESH_MODEL_OP_3(0xC2, CompanyId), 12, 0},
   {ESP_BLE_MESH_MODEL_OP_3(0xC3, CompanyId), 9, 0},
   {ESP_BLE_MESH_MODEL_OP_3(0xC4, CompanyId), 8, 0},
   {ESP_BLE_MESH_MODEL_OP_3(0xC5, CompanyId), 27, 0},
-  {ESP_BLE_MESH_MODEL_OP_3(0xC6, CompanyId), 18, 0},
+  {ESP_BLE_MESH_MODEL_OP_3(0xC6, CompanyId), 0, 0},
   {ESP_BLE_MESH_MODEL_OP_3(0xC7, CompanyId), 12, 0},
   {ESP_BLE_MESH_MODEL_OP_3(0xC8, CompanyId), 37, 0},
   {ESP_BLE_MESH_MODEL_OP_3(0xC9, CompanyId), 46, 0},
-  {ESP_BLE_MESH_MODEL_OP_3(0xCA, CompanyId), 9, 0},
+  {ESP_BLE_MESH_MODEL_OP_3(0xCA, CompanyId), 13, 0},
   {ESP_BLE_MESH_MODEL_OP_3(0xCB, CompanyId), 6, 0},
   {ESP_BLE_MESH_MODEL_OP_3(0xCC, CompanyId), 4, 0},
   {ESP_BLE_MESH_MODEL_OP_3(0xCD, CompanyId), 14, 0},
@@ -82,7 +82,8 @@ void modelCb(esp_ble_mesh_model_cb_event_t event, esp_ble_mesh_model_cb_param_t 
 }
 bool urgent(const Packet &p) {
   return p.op == Op::Close || p.op == Op::Lease || p.op == Op::LeaseAck ||
-    p.op == Op::CommandReply;
+    p.op == Op::ResultQuery || p.op == Op::ResultAck || p.op == Op::Result ||
+    p.op == Op::CommandAck;
 }
 }
 

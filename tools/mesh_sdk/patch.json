@@ -1,5 +1,5 @@
 {
-  "version": "pump-sar-1",
+  "version": "pump-sar-2",
   "inputs": {
     "package.json": "8038fceb30b894871e2d986d6c5ec0527035ba4cd534f3435f6a423bdafe1145",
     "version.txt": "742c2c22a2ebdb26fb9bf21f6f9df508587b7eccd9d59485a4f45935adafde23",
@@ -52,7 +52,7 @@
     "esp_ble_mesh/btc/btc_ble_mesh_prov.c": [
       {
         "old": "#include \"esp_ble_mesh_networking_api.h\"",
-        "new": "#include \"esp_ble_mesh_networking_api.h\"\n#include \"esp_ble_mesh_tracked.h\"\n\n/* Application overrides this hook. No BTC queue allocation on the end path. */\n__attribute__((weak)) void esp_ble_mesh_tracked_send_event(uint32_t ticket, uint8_t event, int error)\n{\n    (void)ticket; (void)event; (void)error;\n}\nstatic void pump_tracked_end(int error, void *user_data)\n{\n    esp_ble_mesh_tracked_send_event((uint32_t)(uintptr_t)user_data, ESP_BLE_MESH_TRACKED_SAR_ENDED, error);\n}\nstatic const struct bt_mesh_send_cb pump_tracked_callbacks = { .end = pump_tracked_end };\n",
+        "new": "#include \"esp_ble_mesh_networking_api.h\"\n#include \"esp_ble_mesh_tracked.h\"\n#include <errno.h>\n\n/* Application overrides this hook. No BTC queue allocation on the end path. */\n__attribute__((weak)) void esp_ble_mesh_tracked_send_event(uint32_t ticket, uint8_t event, int error)\n{\n    (void)ticket; (void)event; (void)error;\n}\nstatic void pump_tracked_end(int error, void *user_data)\n{\n    const uint8_t event = error == -ETIMEDOUT ? ESP_BLE_MESH_TRACKED_SAR_TIMEOUT : ESP_BLE_MESH_TRACKED_SAR_ENDED;\n    esp_ble_mesh_tracked_send_event((uint32_t)(uintptr_t)user_data, event, error);\n}\nstatic const struct bt_mesh_send_cb pump_tracked_callbacks = { .end = pump_tracked_end };\n",
         "count": 1
       },
       {
@@ -80,6 +80,6 @@
     ]
   },
   "additions": {
-    "esp_ble_mesh/api/core/include/esp_ble_mesh_tracked.h": "/* Project SDK extension, patch version pump-sar-1. */\n#pragma once\n#include \"esp_ble_mesh_networking_api.h\"\n#ifdef __cplusplus\nextern \"C\" {\n#endif\n#define ESP_BLE_MESH_PUMP_TRACKED_VERSION 1\n#define ESP_BLE_MESH_TRACKED_ACCEPTED 1\n#define ESP_BLE_MESH_TRACKED_REJECTED 2\n#define ESP_BLE_MESH_TRACKED_SAR_ENDED 3\n/* Return ESP_OK means BTC queued the copy. It never means SAR ended. */\nesp_err_t esp_ble_mesh_server_model_send_msg_tracked(esp_ble_mesh_model_t *model,\n    esp_ble_mesh_msg_ctx_t *ctx, uint32_t opcode, uint16_t length, uint8_t *data,\n    uint32_t ticket);\n/* Nonblocking hook, may run before API return or ACCEPTED. ticket is never reused.\n * REJECTED means no live local SAR. SAR_ENDED means transport freed the context.\n * A reset can omit SAR_ENDED: application must freeze, never time-release. */\nvoid esp_ble_mesh_tracked_send_event(uint32_t ticket, uint8_t event, int error);\n#ifdef __cplusplus\n}\n#endif\n"
+    "esp_ble_mesh/api/core/include/esp_ble_mesh_tracked.h": "/* Project SDK extension, patch version pump-sar-2. */\n#pragma once\n#include \"esp_ble_mesh_networking_api.h\"\n#ifdef __cplusplus\nextern \"C\" {\n#endif\n#define ESP_BLE_MESH_PUMP_TRACKED_VERSION 2\n#define ESP_BLE_MESH_TRACKED_ACCEPTED 1\n#define ESP_BLE_MESH_TRACKED_REJECTED 2\n#define ESP_BLE_MESH_TRACKED_SAR_ENDED 3\n#define ESP_BLE_MESH_TRACKED_SAR_TIMEOUT 4\n/* Return ESP_OK means BTC queued the copy. It never means SAR ended. */\nesp_err_t esp_ble_mesh_server_model_send_msg_tracked(esp_ble_mesh_model_t *model,\n    esp_ble_mesh_msg_ctx_t *ctx, uint32_t opcode, uint16_t length, uint8_t *data,\n    uint32_t ticket);\n/* Nonblocking hook, may run before API return or ACCEPTED. ticket is never reused.\n * REJECTED means no live local SAR. SAR_ENDED means transport freed the context.\n * SAR_TIMEOUT means the transport retry deadline expired.\n * A reset can omit a terminal event: application must freeze, never time-release. */\nvoid esp_ble_mesh_tracked_send_event(uint32_t ticket, uint8_t event, int error);\n#ifdef __cplusplus\n}\n#endif\n"
   }
 }

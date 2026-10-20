@@ -9,9 +9,11 @@ constexpr size_t MaxNodes = 32;
 constexpr uint16_t CompanyId = 0x02E5; // Espressif: development only; obtain own CID for production.
 constexpr uint16_t ModelId = 0x0001;
 constexpr uint16_t AllSlaves = 0xC001;
-constexpr uint32_t LeaseMs = 3000;
-constexpr uint32_t TelemetryMs = 2000;
-constexpr uint16_t ProtocolRevision = 2, RequiredFeatures = 0x000F;
+constexpr uint32_t LeaseMs = 12000;
+constexpr uint32_t CriticalQueueTtlMs = 8000;
+constexpr uint32_t TelemetryMs = 0; // Runtime SUMMARY/STATUS telemetry is removed in revision 3.
+constexpr uint16_t ProtocolRevision = 3, RequiredFeatures = 0x003F;
+constexpr uint16_t SpeedLowPermille = 500, SpeedMediumPermille = 750, SpeedHighPermille = 1000;
 struct JobKey {
   uint32_t epoch = 0, id = 0;
   bool operator==(const JobKey &b) const { return epoch == b.epoch && id == b.id; }
@@ -24,9 +26,13 @@ enum class Reason : uint8_t { None, Target, Manual, Lease, Runtime, NoFlow, Prep
   TailFlow, LocalInterlock, Reboot, PumpFault, Transport, Protocol };
 enum class Reply : uint8_t { Ok, Busy, Invalid, Stale, Conflict, NotReady, Storage, Unauthorized,
   Offline, Capacity, Pending, Unknown };
-enum class Op : uint8_t { Prepare = 0xC0, Start, Lease, Close, StatusGet, Status,
-  Summary, EventAck, Request, Response, Hello, HelloReply, Commission, CommissionReply,
-  LeaseAck, CommandReply, CapabilitiesGet, Capabilities };
+enum class Op : uint8_t { Prepare = 0xC0, Start, Lease, Close,
+  ResultQuery, StatusGet = ResultQuery,
+  Result, Status = Result,
+  ReservedSummary, Summary = ReservedSummary,
+  ResultAck, EventAck = ResultAck,
+  Request, Response, Hello, HelloReply, Commission, CommissionReply,
+  LeaseAck, CommandAck, CommandReply = CommandAck, CapabilitiesGet, Capabilities };
 enum class Action : uint8_t { Start = 1, Stop, Query };
 
 // All multibyte wire fields are explicitly little endian. Never memcpy C++ structs.
@@ -58,6 +64,9 @@ struct Reader {
 inline Packet packet(Op op, uint16_t peer) { Packet p; p.op = op; p.peer = peer; return p; }
 inline bool unicast(uint16_t a) { return a > 0 && a < 0x8000; }
 inline bool validK(uint32_t k) { return k > 0 && k <= 1000000; }
+inline bool validSpeedFactor(uint16_t value) {
+  return value == SpeedLowPermille || value == SpeedMediumPermille || value == SpeedHighPermille;
+}
 inline bool targetPulses(uint32_t ml, uint32_t k, uint32_t &out) {
   if (!ml || ml > 1000000 || !validK(k)) return false;
   const uint64_t p = (uint64_t(ml) * k + 500) / 1000;

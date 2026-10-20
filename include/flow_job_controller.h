@@ -7,10 +7,12 @@ struct ValveConfig {
   uint32_t k = 5880, version = 1, preclose = 0;
   uint32_t startWaitMs = 5000, noFlowMs = 1500, prepareMs = 10000;
   uint32_t quietMs = 500, settleLimitMs = 3000, maxRunMs = 240000;
+  uint32_t leaseMs = LeaseMs;
 };
 struct Dose {
   JobKey key;
-  uint32_t ml = 0, pulses = 0, k = 0, version = 0, maxMs = 0;
+  uint32_t ml = 0, pulses = 0, k = 0, version = 0, maxMs = 0, leaseMs = LeaseMs;
+  uint16_t speedFactorPermille = SpeedHighPermille;
 };
 class ValveIO {
  public:

@@ -41,7 +41,8 @@ Reply FlowJobController::prepare(const Dose &d, uint32_t now) {
   if (!d.key.valid()) return Reply::Invalid;
   if (d.key == s_.key) {
     if (d.ml != dose_.ml || d.pulses != dose_.pulses || d.k != dose_.k ||
-        d.version != dose_.version || d.maxMs != dose_.maxMs) return Reply::Conflict;
+        d.version != dose_.version || d.maxMs != dose_.maxMs ||
+        d.leaseMs != dose_.leaseMs || d.speedFactorPermille != dose_.speedFactorPermille) return Reply::Conflict;
     return s_.phase >= Phase::Prepared ? Reply::Ok : Reply::Stale;
   }
   if (!d.key.newer(fence_)) return Reply::Stale;
@@ -49,7 +50,8 @@ Reply FlowJobController::prepare(const Dose &d, uint32_t now) {
   if (storageFault_) return Reply::Storage;
   if (!cfg_.commissioned || !io_.interlock()) return Reply::NotReady;
   uint32_t expected = 0;
-  if (!targetPulses(d.ml, d.k, expected) || d.pulses != expected || d.k != cfg_.k ||
+  if (!validSpeedFactor(d.speedFactorPermille) || !d.leaseMs || d.leaseMs > 60000 ||
+      !targetPulses(d.ml, d.k, expected) || d.pulses != expected || d.k != cfg_.k ||
       d.version != cfg_.version || !d.maxMs || d.maxMs > cfg_.maxRunMs ||
       cfg_.preclose >= d.pulses) return Reply::Invalid;
   if (!io_.saveFence(d.key)) { storageFault_ = true; return Reply::Storage; }
@@ -74,7 +76,7 @@ Reply FlowJobController::lease(JobKey key, uint32_t seq, uint32_t now) {
   if (transportFault_) return Reply::NotReady;
   if (key != s_.key || !s_.valveCommand) return Reply::Stale;
   // A delayed renewal cannot resurrect an already expired lease.
-  if (elapsed(now, leaseAt_, LeaseMs)) { shut(Reason::Lease, now); return Reply::Stale; }
+  if (elapsed(now, leaseAt_, dose_.leaseMs)) { shut(Reason::Lease, now); return Reply::Stale; }
   // Retransmitted multicast renewals are acknowledged without extending the
   // lease a second time; this makes reply loss safe and deterministic.
   if (seq == leaseSeq_) return Reply::Ok;
@@ -121,7 +123,7 @@ void FlowJobController::tick(uint32_t now) {
   if (s_.valveCommand) {
     // Safety checks precede target closure, and never call the radio or Flash.
     if (!io_.interlock()) shut(Reason::LocalInterlock, now);
-    else if (elapsed(now, leaseAt_, LeaseMs)) shut(Reason::Lease, now);
+    else if (elapsed(now, leaseAt_, dose_.leaseMs)) shut(Reason::Lease, now);
     else if (elapsed(now, openedAt_, dose_.maxMs)) shut(Reason::Runtime, now);
     else if (s_.pulses >= dose_.pulses - cfg_.preclose) shut(Reason::Target, now);
     else if (!s_.pulses && elapsed(now, openedAt_, cfg_.startWaitMs)) shut(Reason::NoFlow, now);

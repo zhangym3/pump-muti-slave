@@ -13,6 +13,7 @@ class Hardware final : public ValveIO {
   explicit Hardware(Storage &store) : store_(store) {}
   bool init();
   FlowReading flow() override;
+  int flowLevel() const;
   bool interlock() override;
   bool saveFence(JobKey k) override { return store_.fence(k); }
   void valve(bool on) override;

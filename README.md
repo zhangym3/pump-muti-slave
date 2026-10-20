@@ -49,6 +49,15 @@ ESP-IDF 5.4 / Bluedroid 的当前 Mesh 使用传统 LE 扫描接口。C3 必须�
 
 ## 测试及维护
 
+### 霍尔脉冲日志
+
+从机通过板载 USB 输出 `HALL_CONFIG`、`HALL` 和 `HALL_JOB`，不增加 Mesh 消息。启动时记录输入配置与计数快照；开阀时输出 `event=start`，供水和关阀结算期间每秒输出 `event=sample`，结算结束输出 `event=final`。空闲时若累计计数变化，每秒最多输出一次 `event=idle_pulse`。USB 维护命令 `hall` 可随时查询，`local` 也附带同样的快照，两者不会启动泵阀。
+
+- `HALL`：`t` 为启动后毫秒，`pin` / `level` 为 GPIO 编号及读取瞬间的电平；`raw` 为本次上电以来通过 100 µs 间隔过滤的下降沿累计数（并非未过滤的电气边沿数）；`delta` 为距上次快照的增量，`dt_ms` 为间隔，`last_ms` 为最后一次有效脉冲的启动后时间。查询也更新快照基准。
+- `HALL_JOB`：相同 `t` 关联任务号、阶段、结束原因、阀门命令和当前任务的 `job_pulses` / `job_ml`。任务计数由控制器更新，和硬件快照可能相差一个控制周期；空闲时保留最近任务结果。
+
+日志在普通任务中格式化后以零等待方式进入 USB 队列，中断只计数；队列满或 USB 未连接时诊断日志可能丢失，累计计数继续更新。`delta>0` 表示接收到有效下降沿；`level` 只是瞬时值，单次高/低电平不能证明没有脉冲。没有出水的空闲采样不能用来判断传感器故障。
+
 ```powershell
 python tools/run_host_tests.py --compiler <zig.exe或clang++路径>
 ```

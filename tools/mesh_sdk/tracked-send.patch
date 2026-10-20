@@ -66,11 +66,12 @@
  #if CONFIG_BLE_MESH_SERVER_MODEL
 --- a/esp_ble_mesh/btc/btc_ble_mesh_prov.c
 +++ b/esp_ble_mesh/btc/btc_ble_mesh_prov.c
-@@ -72,6 +72,19 @@
+@@ -72,6 +72,21 @@
  #include "esp_ble_mesh_common_api.h"
  #include "esp_ble_mesh_provisioning_api.h"
  #include "esp_ble_mesh_networking_api.h"
 +#include "esp_ble_mesh_tracked.h"
++#include <errno.h>
 +
 +/* Application overrides this hook. No BTC queue allocation on the end path. */
 +__attribute__((weak)) void esp_ble_mesh_tracked_send_event(uint32_t ticket, uint8_t event, int error)
@@ -79,7 +80,8 @@
 +}
 +static void pump_tracked_end(int error, void *user_data)
 +{
-+    esp_ble_mesh_tracked_send_event((uint32_t)(uintptr_t)user_data, ESP_BLE_MESH_TRACKED_SAR_ENDED, error);
++    const uint8_t event = error == -ETIMEDOUT ? ESP_BLE_MESH_TRACKED_SAR_TIMEOUT : ESP_BLE_MESH_TRACKED_SAR_ENDED;
++    esp_ble_mesh_tracked_send_event((uint32_t)(uintptr_t)user_data, event, error);
 +}
 +static const struct bt_mesh_send_cb pump_tracked_callbacks = { .end = pump_tracked_end };
 +
@@ -162,24 +164,26 @@
          esp_ble_mesh_model_t *model;
 --- /dev/null
 +++ b/esp_ble_mesh/api/core/include/esp_ble_mesh_tracked.h
-@@ -0,0 +1,21 @@
-+/* Project SDK extension, patch version pump-sar-1. */
+@@ -0,0 +1,23 @@
++/* Project SDK extension, patch version pump-sar-2. */
 +#pragma once
 +#include "esp_ble_mesh_networking_api.h"
 +#ifdef __cplusplus
 +extern "C" {
 +#endif
-+#define ESP_BLE_MESH_PUMP_TRACKED_VERSION 1
++#define ESP_BLE_MESH_PUMP_TRACKED_VERSION 2
 +#define ESP_BLE_MESH_TRACKED_ACCEPTED 1
 +#define ESP_BLE_MESH_TRACKED_REJECTED 2
 +#define ESP_BLE_MESH_TRACKED_SAR_ENDED 3
++#define ESP_BLE_MESH_TRACKED_SAR_TIMEOUT 4
 +/* Return ESP_OK means BTC queued the copy. It never means SAR ended. */
 +esp_err_t esp_ble_mesh_server_model_send_msg_tracked(esp_ble_mesh_model_t *model,
 +    esp_ble_mesh_msg_ctx_t *ctx, uint32_t opcode, uint16_t length, uint8_t *data,
 +    uint32_t ticket);
 +/* Nonblocking hook, may run before API return or ACCEPTED. ticket is never reused.
 + * REJECTED means no live local SAR. SAR_ENDED means transport freed the context.
-+ * A reset can omit SAR_ENDED: application must freeze, never time-release. */
++ * SAR_TIMEOUT means the transport retry deadline expired.
++ * A reset can omit a terminal event: application must freeze, never time-release. */
 +void esp_ble_mesh_tracked_send_event(uint32_t ticket, uint8_t event, int error);
 +#ifdef __cplusplus
 +}

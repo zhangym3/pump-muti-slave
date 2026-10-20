@@ -39,6 +39,7 @@ bool Hardware::init() {
   return flowPin(board::BranchFlow, &primary_);
 }
 FlowReading Hardware::flow() { return read(primary_); }
+int Hardware::flowLevel() const { return gpio_get_level(gpio_num_t(board::BranchFlow)); }
 bool Hardware::interlock() {
   if constexpr (!board::SlaveInterlockEnabled) return true;
   return gpio_get_level(gpio_num_t(board::SlaveInterlock)) == 1;

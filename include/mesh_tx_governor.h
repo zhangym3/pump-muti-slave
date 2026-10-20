@@ -1,5 +1,6 @@
 #pragma once
 #include "protocol.h"
+#include <errno.h>
 
 namespace pump {
 struct MeshSubmission { Packet packet; uint32_t issuedAt = 0; int error = 0; bool committed = false; };
@@ -10,7 +11,8 @@ class MeshTxGovernor {
   struct Dispatch { Packet packet; uint32_t ticket = 0, issuedAt = 0; };
   struct Metrics {
     uint32_t merged = 0, expired = 0, submitted = 0, ended = 0, faults = 0;
-    uint32_t maxSarMs = 0, traceLost = 0; uint8_t peakSar = 0, peakPending = 0;
+    uint32_t maxSarMs = 0, traceLost = 0, helloTimeouts = 0;
+    uint8_t peakSar = 0, peakPending = 0;
   };
   enum class FaultReason : uint8_t { None, Rejected, SarEnd, QueueFull, QueueExpired,
     MissingCompletion, TicketExhausted, SequenceExhausted };
@@ -40,7 +42,7 @@ class MeshTxGovernor {
       if (!pending_[i].used) { if (free == Pending) free = i; continue; }
       ++used;
       auto &old = pending_[i];
-      if (p.op == Op::Status && old.p.op == Op::Status && p.peer == old.p.peer &&
+      if (p.op == Op::Result && old.p.op == Op::Result && p.peer == old.p.peer &&
           p.size == 27 && old.p.size == 27 && key(p) == key(old.p)) {
         Reader a{old.p}, b{p}; a.at = b.at = 20;
         const auto previous=a.u32(), incoming=b.u32();
@@ -119,15 +121,21 @@ class MeshTxGovernor {
     trace(s,0,0,now);
     out = {s.p, s.id, now}; return true;
   }
-  // Event 1=core accepted, 2=core/API rejected, 3=true SAR end.
+  // Event 1=core accepted, 2=core/API rejected, 3=SAR end, 4=SAR timeout.
   // Fixed per-ticket bits tolerate end-before-accepted and duplicate/late events.
   void event(uint32_t ticket, uint8_t type, int error, uint32_t now = 0) {
     for (auto &s : slots_) if (s.used && s.id == ticket) {
+      bool newEnd = false;
       if (type == 1 || type == 2) {
         if (!s.stack) { s.stack = true; s.error = type == 2 ? (error ? error : -1) : error; }
-      } else if (type == 3 && !s.end) { s.end = true; s.endError = error; s.endAt = now; }
+      } else if ((type == 3 || type == 4) && !s.end) {
+        s.end = true; s.endType = type; s.endError = error; s.endAt = now; newEnd = true;
+      }
       trace(s,type,error,now);
-      if (!s.faultReported && ((s.stack && s.error) || (s.end && s.endError))) {
+      const bool helloTimeout = s.p.op == Op::Hello && s.endType == 4 && s.endError == -ETIMEDOUT;
+      if (newEnd && helloTimeout) ++metrics_.helloTimeouts;
+      const bool endFailure = s.end && (s.endError || s.endType == 4) && !helloTimeout;
+      if (!s.faultReported && ((s.stack && s.error) || endFailure)) {
         s.faultReported = true;
         fault(s.stack && s.error ? FaultReason::Rejected : FaultReason::SarEnd,
           s.p,now,s.id,s.issuedAt,s.queuedAt,s.stack && s.error ? s.error : s.endError);
@@ -188,44 +196,43 @@ class MeshTxGovernor {
   // authorization reply after a transport fault. No queued business replay.
   static bool diagnostic(const Packet &p) {
     switch (p.op) {
-      case Op::Hello: return p.size == 9;
+      case Op::Hello: return p.size == 13;
       case Op::HelloReply: return p.size == 6;
       case Op::CapabilitiesGet: return p.size == 4;
       case Op::Capabilities: return p.size == 12;
-      case Op::StatusGet: return p.size == 8;
+      case Op::ResultQuery: return p.size == 8;
       case Op::Close: return p.size == 9;
-      case Op::EventAck: return p.size == 12;
-      case Op::Status: return p.size == 27 && !(p.bytes[26] & 1) &&
-        (p.bytes[24] == uint8_t(Phase::Idle) ||
-         (p.bytes[24] >= uint8_t(Phase::Settling) && p.bytes[24] <= uint8_t(Phase::Fault)));
-      case Op::CommandReply: return p.size == 10 && p.bytes[9] > uint8_t(Reply::Ok) && p.bytes[9] <= uint8_t(Reply::Unknown);
+      case Op::ResultAck: return p.size == 12;
+      case Op::Result: return p.size == 27 && !(p.bytes[26] & 1) &&
+        (p.bytes[24] == uint8_t(Phase::Done) || p.bytes[24] == uint8_t(Phase::Fault));
+      case Op::CommandAck: return p.size == 10 && p.bytes[9] > uint8_t(Reply::Ok) && p.bytes[9] <= uint8_t(Reply::Unknown);
       case Op::LeaseAck: return p.size == 13 && p.bytes[12] > uint8_t(Reply::Ok) && p.bytes[12] <= uint8_t(Reply::Unknown);
       case Op::CommissionReply: return p.size == 14 && p.bytes[4] > uint8_t(Reply::Ok) && p.bytes[4] <= uint8_t(Reply::Unknown);
       default: return false;
     }
   }
   unsigned dispatchPriority(const Packet &p) const {
-    if (frozen_ && (p.op == Op::Hello || p.op == Op::HelloReply)) return 1;
+    if (frozen_ && (p.op == Op::Hello || p.op == Op::HelloReply)) return 0;
     return priority(p);
   }
   static bool authorizes(const Packet &p) { return p.op == Op::Prepare || p.op == Op::Start || p.op == Op::Lease; }
   static bool critical(const Packet &p) {
-    return authorizes(p) || p.op == Op::Close || p.op == Op::LeaseAck ||
-      p.op == Op::Status || p.op == Op::EventAck || p.op == Op::CommandReply;
+      return authorizes(p) || p.op == Op::Close || p.op == Op::LeaseAck ||
+      p.op == Op::Result || p.op == Op::ResultAck || p.op == Op::CommandAck;
   }
   static unsigned priority(const Packet &p) {
     if (p.op == Op::Close) return 0;
     if (p.op == Op::Lease || p.op == Op::LeaseAck) return 1;
-    if (p.op == Op::Status || p.op == Op::EventAck || p.op == Op::CommandReply) return 2;
+    if (p.op == Op::Result || p.op == Op::ResultAck) return 1;
+    if (p.op == Op::CommandAck) return 2;
     if (p.op == Op::Prepare || p.op == Op::Start) return 3;
     return 4;
   }
-  static uint32_t ttl(const Packet &p) { return p.op == Op::Lease || p.op == Op::LeaseAck ? 800 : 2000; }
+  static uint32_t ttl(const Packet &p) { return critical(p) ? CriticalQueueTtlMs : 2000; }
   static bool sameIntent(const Packet &a, const Packet &b) {
     if (a.peer != b.peer || a.op != b.op) return false;
     if (a.op == Op::Hello || a.op == Op::HelloReply) return true;
-    if (a.op == Op::Summary) return key(a) == key(b);
-    if (a.op == Op::Status && a.size == 27 && b.size == 27 && key(a) == key(b)) {
+    if (a.op == Op::Result && a.size == 27 && b.size == 27 && key(a) == key(b)) {
       // Revision is the physical event, pulses are a replaceable snapshot.
       Reader ar{a}, br{b}; ar.at = br.at = 20;
       return ar.u32() == br.u32();
@@ -250,6 +257,7 @@ class MeshTxGovernor {
   struct Intent { Packet p; uint32_t queuedAt = 0, order = 0; bool used = false; };
   struct Slot {
     Packet p; uint32_t issuedAt = 0, queuedAt = 0, id = 0, endAt = 0; int error = 0, endError = 0;
+    uint8_t endType = 0;
     bool used = false, segmented = false, stack = false, end = false, reported = false, commitReported = false;
     bool faultReported = false, timeoutReported = false;
   };
@@ -258,8 +266,8 @@ class MeshTxGovernor {
     Reader r{s.p}; const auto job=r.key();
     const uint32_t seq = s.p.op == Op::Lease || s.p.op == Op::LeaseAck ? r.u32() : 0;
     uint32_t revision=0;
-    if (s.p.op==Op::Status || s.p.op==Op::Summary || s.p.op==Op::EventAck) {
-      r.at=s.p.op==Op::Status ? 20 : s.p.op==Op::Summary ? 12 : 8; revision=r.u32();
+    if (s.p.op==Op::Result || s.p.op==Op::ResultAck) {
+      r.at=s.p.op==Op::Result ? 20 : 8; revision=r.u32();
     }
     traces_[traceWrite_++ % 64] = {now,s.id,s.issuedAt,s.queuedAt,job,seq,revision,error,s.p.peer,uint8_t(s.p.op),event,s.segmented};
     ++traceCount_;

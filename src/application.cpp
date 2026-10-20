@@ -18,19 +18,22 @@ void encodeStatus(Packet &p, const ValveStatus &s) {
 
 bool Application::status(bool force) {
   const auto current = valve_.status();
+  if (current.phase != Phase::Done && current.phase != Phase::Fault) return false;
   if (!force && ackedKey_ == current.key && ackedRevision_ == current.revision) return false;
-  auto packetOut = packet(Op::Status, store_.state().master);
+  auto packetOut = packet(Op::Result, store_.state().master);
   encodeStatus(packetOut, current);
   return mesh_.send(packetOut);
 }
 
-void Application::reject(JobKey key, Op command, Reply reply) {
-  auto packetOut = packet(Op::CommandReply, store_.state().master);
+void Application::commandAck(JobKey key, Op command, Reply reply) {
+  auto packetOut = packet(Op::CommandAck, store_.state().master);
   Writer writer{packetOut}; writer.key(key); writer.u8(uint8_t(command)); writer.u8(uint8_t(reply));
   mesh_.send(packetOut);
-  char line[64];
-  snprintf(line, sizeof(line), "JOB_REJECT %s", replyName(reply));
-  gateway_.publish(line);
+  if (reply != Reply::Ok) {
+    char line[64];
+    snprintf(line, sizeof(line), "JOB_REJECT %s", replyName(reply));
+    gateway_.publish(line);
+  }
 }
 
 void Application::incoming(const Packet &packetIn, uint32_t now) {
@@ -76,6 +79,7 @@ void Application::incoming(const Packet &packetIn, uint32_t now) {
         auto hello = packet(Op::Hello, store_.state().master);
         Writer helloWriter{hello}; helloWriter.u32(valve_.config().k); helloWriter.u32(valve_.config().version);
         helloWriter.u8(store_.commissioned() && storageHealthy_ ? 1 : 0);
+        helloWriter.u32(PUMP_BUILD_ID);
         mesh_.send(hello);
       }
       char line[96];
@@ -88,17 +92,21 @@ void Application::incoming(const Packet &packetIn, uint32_t now) {
       Dose dose;
       dose.key = reader.key(); dose.ml = reader.u32(); dose.pulses = reader.u32();
       dose.k = reader.u32(); dose.version = reader.u32(); dose.maxMs = reader.u32();
-      if (!reader.done()) return;
+      dose.speedFactorPermille = reader.u16(); dose.leaseMs = reader.u32();
+      const uint8_t flags = reader.u8();
+      if (!reader.done() || flags) return;
       const Reply result = !mesh_.healthy() ? Reply::NotReady :
         storageHealthy_ ? valve_.prepare(dose, now) : Reply::Storage;
-      if (result == Reply::Ok) status(); else reject(dose.key, Op::Prepare, result);
+      commandAck(dose.key, Op::Prepare, result);
       break;
     }
     case Op::Start: {
       const JobKey key = reader.key();
       if (!reader.done()) return;
       const Reply result = mesh_.healthy() ? valve_.start(key, now) : Reply::NotReady;
-      if (result == Reply::Ok) status(); else reject(key, Op::Start, result);
+      // Capture START before another command in this receive batch can close it.
+      hallDiagnostics(nowMs());
+      commandAck(key, Op::Start, result);
       break;
     }
     case Op::Lease: {
@@ -127,11 +135,19 @@ void Application::incoming(const Packet &packetIn, uint32_t now) {
       }
       break;
     }
-    case Op::StatusGet:
-      reader.key();
-      if (reader.done()) status(true);
+    case Op::ResultQuery: {
+      const JobKey requested = reader.key();
+      const auto &saved = store_.state();
+      // Queries are read-only recovery; they never expose a live or unsaved run.
+      if (reader.done() && saved.resultValid && saved.result.key.valid() &&
+          (!requested.valid() || requested == saved.result.key)) {
+        auto result = packet(Op::Result, store_.state().master);
+        encodeStatus(result, saved.result);
+        mesh_.send(result);
+      }
       break;
-    case Op::EventAck: {
+    }
+    case Op::ResultAck: {
       const JobKey key = reader.key();
       const uint32_t revision = reader.u32();
       if (reader.done() && key == valve_.status().key && revision == valve_.status().revision) {
@@ -145,7 +161,7 @@ void Application::incoming(const Packet &packetIn, uint32_t now) {
   }
 }
 
-void Application::localState(uint32_t) {
+void Application::localState(uint32_t now) {
   const auto current = valve_.status();
   char line[192];
   snprintf(line, sizeof(line),
@@ -160,7 +176,45 @@ void Application::localState(uint32_t) {
   snprintf(line, sizeof(line), "INTERLOCK enabled=%u ready=%u pin=%d",
     board::SlaveInterlockEnabled, hw_.interlock(), board::SlaveInterlock);
   gateway_.publish(line);
+  hallState(now, "query");
   meshState();
+}
+
+void Application::hallState(uint32_t now, const char *event) {
+  const FlowReading reading = hw_.flow();
+  const auto current = valve_.status();
+  char line[192];
+  // Queue bounded snapshots; neither the ISR nor the control task waits on USB.
+  // raw is the lifetime accepted-edge count, after HallMinEdgeUs filtering.
+  snprintf(line, sizeof(line),
+    "HALL t=%lu event=%s pin=%d level=%d raw=%lu delta=%lu dt_ms=%lu last_ms=%lu",
+    static_cast<unsigned long>(now), event, board::BranchFlow, hw_.flowLevel(),
+    static_cast<unsigned long>(reading.pulses),
+    static_cast<unsigned long>(reading.pulses - hallCount_),
+    static_cast<unsigned long>(now - hallAt_), static_cast<unsigned long>(reading.lastMs));
+  gateway_.publish(line);
+  snprintf(line, sizeof(line),
+    "HALL_JOB t=%lu job=%lu:%lu phase=%s reason=%s valve=%u job_pulses=%lu job_ml=%lu",
+    static_cast<unsigned long>(now), static_cast<unsigned long>(current.key.epoch),
+    static_cast<unsigned long>(current.key.id), phaseName(current.phase),
+    reasonName(current.reason), current.valveCommand,
+    static_cast<unsigned long>(current.pulses),
+    static_cast<unsigned long>(volumeMl(current.pulses, current.k)));
+  gateway_.publish(line);
+  hallAt_ = now;
+  hallCount_ = reading.pulses;
+}
+
+void Application::hallDiagnostics(uint32_t now) {
+  const auto current = valve_.status();
+  const bool active = current.phase == Phase::Opening || current.phase == Phase::Running ||
+    current.phase == Phase::Settling;
+  if (active != hallActive_) {
+    hallState(now, active ? "start" : "final");
+  } else if (elapsed(now, hallAt_, 1000) && (active || hw_.flow().pulses != hallCount_)) {
+    hallState(now, active ? "sample" : "idle_pulse");
+  }
+  hallActive_ = active;
 }
 
 void Application::meshState() {
@@ -189,6 +243,7 @@ void Application::command(CommandLine &line, uint32_t) {
     return;
   }
   if (!strcmp(op, "local") && count == 1) { localState(nowMs()); return; }
+  if (!strcmp(op, "hall") && count == 1) { hallState(nowMs(), "query"); return; }
   if (!strcmp(op, "mesh-diag") && count == 1) { meshState(); return; }
   if (!strcmp(op, "estop") && count == 1) {
     valve_.emergency(Reason::LocalInterlock, nowMs());
@@ -218,7 +273,7 @@ void Application::command(CommandLine &line, uint32_t) {
     if (!store_.write(next)) { storageHealthy_ = false; gateway_.publish("STORAGE"); return; }
     mesh_.master(next.master); masterEpoch_ = 0; gateway_.publish("OK master"); return;
   }
-  gateway_.publish("HELP hello | local | mesh-diag | estop | k PULSES_PER_ML | master ADDR");
+  gateway_.publish("HELP hello | local | hall | mesh-diag | estop | k PULSES_PER_ML | master ADDR");
 }
 
 void Application::periodic(uint32_t now) {
@@ -233,6 +288,7 @@ void Application::periodic(uint32_t now) {
     auto hello = packet(Op::Hello, store_.state().master);
     Writer writer{hello}; writer.u32(valve_.config().k); writer.u32(valve_.config().version);
     writer.u8(valve_.config().commissioned && storageHealthy_);
+    writer.u32(PUMP_BUILD_ID);
     if (mesh_.send(hello)) {
       helloAt_ = now;
       // Recovery can take longer than the event retry budget. A new heartbeat
@@ -248,12 +304,6 @@ void Application::periodic(uint32_t now) {
       elapsed(now, eventAt_, 1000 + offset)) {
     if (status()) { eventAt_ = now; ++eventAttempts_; }
   }
-  if (current.key.valid() && valve_.busy() && elapsed(now, summaryAt_, TelemetryMs)) {
-    auto summary = packet(Op::Summary, store_.state().master);
-    Writer writer{summary}; writer.key(current.key); writer.u32(current.pulses); writer.u32(current.revision);
-    writer.u8(uint8_t(current.phase)); writer.u8(current.valveCommand ? 1 : 0);
-    if (mesh_.send(summary)) summaryAt_ = now;
-  }
 }
 
 void Application::run() {
@@ -263,11 +313,16 @@ void Application::run() {
   bool previousOutput=false;
   const uint32_t boot = nowMs();
   helloAt_ = boot - 9000 + (mesh_.address() % 32) * 19;
-  summaryAt_ = boot - TelemetryMs + (mesh_.address() % 32) * 53;
   char ready[160];
   snprintf(ready, sizeof(ready), "PUMP_MULTI_V1 ready role=VALVE_SLAVE commissioned=%u; type hello or local",
     valve_.config().commissioned && storageHealthy_);
   gateway_.publish(ready);
+  char hallConfig[128];
+  snprintf(hallConfig, sizeof(hallConfig),
+    "HALL_CONFIG pin=%d edge=falling pullup=1 min_us=%lu period_ms=1000",
+    board::BranchFlow, static_cast<unsigned long>(board::HallMinEdgeUs));
+  gateway_.publish(hallConfig);
+  hallState(boot, "boot");
   TickType_t tick = xTaskGetTickCount();
   for (;;) {
     const uint32_t now = nowMs();
@@ -275,12 +330,14 @@ void Application::run() {
     if (interval>maxTick) maxTick=interval;
     if (elapsed(now,diagnosticAt,10000)) {
       const auto m=mesh_.metrics(); diagnosticAt=now;
-      ESP_LOGI("mesh_diag", "healthy=%u submitted=%lu ended=%lu merged=%lu expired=%lu faults=%lu peak_sar=%u peak_pending=%u sar_max_ms=%lu tick_max_ms=%lu trace_lost=%lu",
+      ESP_LOGI("mesh_diag", "healthy=%u submitted=%lu ended=%lu merged=%lu expired=%lu faults=%lu hello_timeout=%lu peak_sar=%u peak_pending=%u sar_max_ms=%lu tick_max_ms=%lu trace_lost=%lu",
         mesh_.healthy(),(unsigned long)m.submitted,(unsigned long)m.ended,(unsigned long)m.merged,(unsigned long)m.expired,
-        (unsigned long)m.faults,m.peakSar,m.peakPending,(unsigned long)m.maxSarMs,(unsigned long)maxTick,(unsigned long)m.traceLost);
+        (unsigned long)m.faults,(unsigned long)m.helloTimeouts,m.peakSar,m.peakPending,(unsigned long)m.maxSarMs,(unsigned long)maxTick,(unsigned long)m.traceLost);
       publishMeshDiagnostics(mesh_.diagnostics(),mesh_.healthy(),[](const char *line) { ESP_LOGI("mesh_state","%s",line); });
     }
     valve_.tick(now);
+    // Preserve a terminal snapshot before PREPARE can replace the completed job.
+    hallDiagnostics(nowMs());
     MeshSubmission sent; while (mesh_.takeSubmission(sent)) {}
     if (!mesh_.healthy() && !valve_.transportFault()) {
       ackedKey_ = {}; ackedRevision_ = UINT32_MAX;
@@ -294,6 +351,7 @@ void Application::run() {
     if (previousOutput != valve_.output()) {
       previousOutput=valve_.output(); ESP_LOGI("output","t=%lu command=%u",(unsigned long)now,previousOutput);
     }
+    hallDiagnostics(nowMs());
     periodic(now);
     esp_task_wdt_reset();
     vTaskDelayUntil(&tick, pdMS_TO_TICKS(5));
