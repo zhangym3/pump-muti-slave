@@ -42,7 +42,8 @@ Reply FlowJobController::prepare(const Dose &d, uint32_t now) {
   if (d.key == s_.key) {
     if (d.ml != dose_.ml || d.pulses != dose_.pulses || d.k != dose_.k ||
         d.version != dose_.version || d.maxMs != dose_.maxMs ||
-        d.leaseFloor != dose_.leaseFloor || d.leaseMs != dose_.leaseMs || d.speedFactorPermille != dose_.speedFactorPermille) return Reply::Conflict;
+        d.leaseFloor != dose_.leaseFloor || d.leaseMs != dose_.leaseMs || d.speedFactorPermille != dose_.speedFactorPermille ||
+        d.calibrated != dose_.calibrated || d.liveTelemetry != dose_.liveTelemetry) return Reply::Conflict;
     return s_.phase >= Phase::Prepared ? Reply::Ok : Reply::Stale;
   }
   if (!d.key.newer(fence_)) return Reply::Stale;
@@ -51,7 +52,7 @@ Reply FlowJobController::prepare(const Dose &d, uint32_t now) {
   if (!cfg_.commissioned || !io_.interlock()) return Reply::NotReady;
   uint32_t expected = 0;
   if (!d.leaseFloor || !validSpeedFactor(d.speedFactorPermille) || !d.leaseMs || d.leaseMs > 60000 ||
-      !targetPulses(d.ml, d.k, expected) || d.pulses != expected || d.k != cfg_.k ||
+      !targetPulses(d.ml, d.k, expected) || d.pulses != expected || (!d.calibrated && d.k != cfg_.k) ||
       d.version != cfg_.version || !d.maxMs || d.maxMs > cfg_.maxRunMs ||
       cfg_.preclose >= d.pulses) return Reply::Invalid;
   if (!io_.saveFence(d.key)) { storageFault_ = true; return Reply::Storage; }

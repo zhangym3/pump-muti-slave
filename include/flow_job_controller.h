@@ -14,6 +14,8 @@ struct Dose {
   uint32_t ml = 0, pulses = 0, k = 0, version = 0, maxMs = 0, leaseMs = LeaseMs;
   uint32_t leaseFloor = 1;
   uint16_t speedFactorPermille = SpeedHighPermille;
+  bool calibrated = false;
+  bool liveTelemetry = false;
 };
 class ValveIO {
  public:
@@ -42,6 +44,8 @@ class FlowJobController {
   void setCommissioned(bool value) { cfg_.commissioned = value; }
   bool busy() const;
   bool output() const { return s_.valveCommand; }
+  bool liveTelemetry() const { return dose_.liveTelemetry; }
+  uint32_t runtimeMs(uint32_t now) const { return uint32_t(now - openedAt_); }
   bool transportFault() const { return transportFault_; }
   ValveStatus status() const { return s_; }
   const ValveConfig &config() const { return cfg_; }

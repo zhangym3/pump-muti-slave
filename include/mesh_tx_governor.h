@@ -33,6 +33,7 @@ class MeshTxGovernor {
   explicit MeshTxGovernor(uint8_t sarLimit = 2) : sarLimit_(sarLimit) {}
   bool enqueue(const Packet &p, uint32_t now) {
     if (!p.peer || p.size > sizeof(p.bytes)) return false;
+    if (p.op == Op::Progress && (!unicast(p.peer) || p.size != 16 || !key(p).valid())) return false;
     if (p.op == Op::Lease && (!p.context.valid() || p.size != 8)) return false;
     if (scope_.valid() && authorizes(p) && key(p) != scope_) return false;
     // Only identical successful command replies already owned by the SDK merge.
@@ -51,6 +52,13 @@ class MeshTxGovernor {
       if (!pending_[i].used) { if (free == Pending) free = i; continue; }
       ++used;
       auto &old = pending_[i];
+      if (p.op == Op::Progress && old.p.op == Op::Progress && p.peer == old.p.peer && key(p) == key(old.p)) {
+        Reader previous{old.p}, incoming{p}; previous.at = incoming.at = 12;
+        const uint32_t oldRuntime = previous.u32(), newRuntime = incoming.u32();
+        if (serialNewer(newRuntime, oldRuntime)) old.p = p;
+        ++metrics_.merged;
+        return true;
+      }
       if (p.op == Op::Result && old.p.op == Op::Result && p.peer == old.p.peer &&
           p.size == 27 && old.p.size == 27 && key(p) == key(old.p)) {
         Reader a{old.p}, b{p}; a.at = b.at = 20;
@@ -160,7 +168,8 @@ class MeshTxGovernor {
       const bool helloTimeout = s.p.op == Op::Hello && s.endType == 4 && s.endError == -ETIMEDOUT;
       if (newEnd && helloTimeout) ++metrics_.helloTimeouts;
       const bool endFailure = s.end && (s.endError || s.endType == 4) && !helloTimeout;
-      if (!s.faultReported && ((s.stack && s.error) || endFailure)) {
+      // A lost progress snapshot is replaceable. Missing SDK callbacks still fault in next().
+      if (s.p.op != Op::Progress && !s.faultReported && ((s.stack && s.error) || endFailure)) {
         s.faultReported = true;
         fault(s.stack && s.error ? FaultReason::Rejected : FaultReason::SarEnd,
           s.p,now,s.id,s.issuedAt,s.queuedAt,s.stack && s.error ? s.error : s.endError);
@@ -261,7 +270,7 @@ class MeshTxGovernor {
     if (p.op == Op::Prepare || p.op == Op::Start) return 3;
     return 4;
   }
-  static uint32_t ttl(const Packet &p) { return critical(p) ? CriticalQueueTtlMs : 2000; }
+  static uint32_t ttl(const Packet &p) { return critical(p) ? CriticalQueueTtlMs : p.op == Op::Progress ? 5000 : 2000; }
   static bool sameIntent(const Packet &a, const Packet &b) {
     if (a.peer != b.peer || a.op != b.op) return false;
     if (a.op == Op::Hello || a.op == Op::HelloReply) return true;

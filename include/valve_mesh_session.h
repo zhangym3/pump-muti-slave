@@ -13,7 +13,10 @@ class ValveMeshSession {
     if (p.op==Op::Prepare) {
       Dose d; d.key=r.key(); d.ml=r.u32(); d.pulses=r.u32(); d.k=r.u32();
       d.version=r.u32(); d.maxMs=r.u32(); d.speedFactorPermille=r.u16(); d.leaseMs=r.u32();
-      const auto flags=r.u8(); d.leaseFloor=r.u32(); if (!r.done() || flags) return false;
+      const auto flags=r.u8(); d.leaseFloor=r.u32();
+      if (!r.done() || (flags & ~(PrepareCalibrated | PrepareLiveTelemetry))) return false;
+      d.calibrated=(flags & PrepareCalibrated)!=0;
+      d.liveTelemetry=(flags & PrepareLiveTelemetry)!=0;
       const auto result=!healthy ? Reply::NotReady : !storage ? Reply::Storage : valve_.prepare(d,now);
       if (result==Reply::Ok) reset(d.key);
       if (result!=Reply::Ok || !preparePassed_) command(p.peer,d.key,Op::Prepare,result,send);
@@ -47,6 +50,16 @@ class ValveMeshSession {
   template<class Send> void poll(uint16_t peer,unsigned slot,uint32_t now,Send send) {
     const auto s=valve_.status(); if (!s.key.valid()) return;
     reset(s.key);
+    if (unicast(peer) && valve_.liveTelemetry() && s.valveCommand &&
+        (s.phase==Phase::Opening || s.phase==Phase::Running)) {
+      const uint32_t runtime=valve_.runtimeMs(now);
+      // Stagger the first sample; retries wait for the next sample, even on congestion.
+      if ((!liveAttempted_ && runtime>=LiveTelemetryMs+(slot%5)*300) ||
+          (liveAttempted_ && elapsed(now,liveAt_,LiveTelemetryMs))) {
+        auto p=packet(Op::Progress,peer); Writer w{p}; w.key(s.key); w.u32(s.pulses); w.u32(runtime);
+        liveAttempted_=true; liveAt_=now; send(p);
+      }
+    }
     if (s.valveCommand || s.reason!=Reason::Target || closedAck_ || closedAttempts_>=6) return;
     if (!closedAttempts_ || elapsed(now,closedAt_,250+(slot%5)*10)) {
       if (closed(peer,s.key,send)) { closedAt_=now; ++closedAttempts_; }
@@ -56,6 +69,7 @@ class ValveMeshSession {
   void reset(JobKey key) {
     if (key_==key) return;
     key_=key; preparePassed_=startPassed_=closedAck_=false; closedAt_=closedAttempts_=0;
+    liveAttempted_=false; liveAt_=0;
   }
   template<class Send> static bool closed(uint16_t peer,JobKey key,Send send) {
     auto p=packet(Op::TargetClosed,peer); Writer w{p}; w.key(key); return send(p);
@@ -67,5 +81,6 @@ class ValveMeshSession {
   FlowJobController &valve_; JobKey key_;
   bool preparePassed_=false,startPassed_=false,closedAck_=false;
   uint32_t closedAt_=0; unsigned closedAttempts_=0;
+  bool liveAttempted_=false; uint32_t liveAt_=0;
 };
 }

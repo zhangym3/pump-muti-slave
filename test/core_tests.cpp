@@ -35,6 +35,29 @@ void validation_and_calibration() {
   auto calibrated = dose(); calibrated.pulses = 200; calibrated.k = 2000; calibrated.version = 2;
   CHECK(controller.prepare(calibrated, 0) == Reply::Ok); CHECK(controller.configure(3000, 3) == Reply::Busy);
 }
+void job_calibration() {
+  for(auto speed:{SpeedLowPermille,SpeedMediumPermille,SpeedHighPermille}) {
+    FakeValve io; FlowJobController valve(io,config()); valve.boot({});
+    auto d=dose(); d.speedFactorPermille=speed; d.k=2500; d.pulses=250;
+    CHECK(valve.prepare(d,0)==Reply::Invalid); // Legacy K guard remains.
+    d.calibrated=true; CHECK(valve.prepare(d,0)==Reply::Ok);
+    auto changed=d; changed.calibrated=false; CHECK(valve.prepare(changed,1)==Reply::Conflict);
+    CHECK(valve.prepare(d,1)==Reply::Ok && io.writes==1);
+    CHECK(valve.start(d.key,2)==Reply::Ok);
+    io.reading={249,20}; valve.tick(20); CHECK(io.on);
+    io.reading={250,30}; valve.tick(30); CHECK(!io.on);
+    valve.tick(530); CHECK(valve.status().phase==Phase::Done && valve.status().k==2500);
+    CHECK(valve.configure(3000,2)==Reply::Ok && valve.status().k==2500);
+    CHECK(volumeMl(valve.status().pulses,valve.status().k)==100);
+    auto next=d; next.key.id++; next.version=2; next.k=0;
+    CHECK(valve.prepare(next,600)==Reply::Invalid);
+    next.k=2500; next.pulses++; CHECK(valve.prepare(next,600)==Reply::Invalid);
+    next.pulses--; next.version=1; CHECK(valve.prepare(next,600)==Reply::Invalid);
+    next.version=2; CHECK(valve.prepare(next,600)==Reply::Ok);
+    valve.tick(5600); CHECK(!io.on); // No START, no opening.
+  }
+  std::puts("PASS job K selection, duplicate identity, target cutoff, historical K, invalid K/target/version");
+}
 void commission_gate() {
   FakeValve io; auto uncommissioned = config(); uncommissioned.commissioned = false;
   FlowJobController controller(io, uncommissioned); controller.boot({});
@@ -70,7 +93,7 @@ void leases_and_interlock() {
 }
 void wire_contract_vectors() {
   CHECK(uint16_t(CompanyId) == 0x02E5 && uint16_t(ModelId) == 0x0001 && uint16_t(AllSlaves) == 0xC001);
-  CHECK(uint8_t(Op::Prepare) == 0xC0 && uint8_t(Op::HelloReply) == 0xCB);
+  CHECK(uint8_t(Op::Prepare) == 0xC0 && uint8_t(Op::HelloReply) == 0xCB && uint8_t(Op::Progress) == 0xD6);
   CHECK(uint8_t(Op::Commission) == 0xCC && uint8_t(Op::CommissionReply) == 0xCD);
   ControlRequest q; q.action = Action::Start; q.epoch = 0x11223344; q.client = 0x0102030405060708ULL;
   q.sequence = 0x99AABBCC; q.mask = 0x80000001; q.ml = 500; q.maxMs = 60000; q.stopKey = {0x55667788, 0xAABBCCDD};
@@ -83,6 +106,11 @@ void wire_contract_vectors() {
     decoded.client == q.client && decoded.sequence == q.sequence && decoded.mask == q.mask && decoded.ml == q.ml &&
     decoded.maxMs == q.maxMs && decoded.stopKey == q.stopKey);
   --p.size; CHECK(!decodeRequest(p, decoded));
+  auto progress=packet(Op::Progress,2); Writer progressWriter{progress};
+  progressWriter.key({1,2}); progressWriter.u32(120); progressWriter.u32(2000);
+  const uint8_t expectedProgress[] = {1,0,0,0,2,0,0,0,0x78,0,0,0,0xD0,0x07,0,0};
+  CHECK(progress.peer==2 && unicast(progress.peer) && controlFormat(progress) && progress.size==sizeof(expectedProgress));
+  for(size_t i=0;i<sizeof(expectedProgress);++i) CHECK(progress.bytes[i]==expectedProgress[i]);
 }
 void transport_lock() {
   for(unsigned phase=0;phase<4;++phase) {
@@ -118,4 +146,4 @@ void prepared_deadline_and_floor() {
   }
   std::puts("PASS prepared 19999/20000ms boundary, non-sliding duplicate and lease floor validation");
 }
-int main() { prepared_deadline_and_floor(); target_and_tail(); validation_and_calibration(); commission_gate(); leases_and_interlock(); wire_contract_vectors(); transport_lock(); std::puts("PASS transport fault locks idle/prepared/open/terminal control until controlled restart"); std::puts("slave flow tests passed"); }
+int main() { job_calibration(); prepared_deadline_and_floor(); target_and_tail(); validation_and_calibration(); commission_gate(); leases_and_interlock(); wire_contract_vectors(); transport_lock(); std::puts("PASS transport fault locks idle/prepared/open/terminal control until controlled restart"); std::puts("slave flow tests passed"); }

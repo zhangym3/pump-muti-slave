@@ -1,14 +1,16 @@
-# 协议 V3
+# 协议 V4
 
 Bluetooth Mesh Vendor CID `0x02E5`、Model ID `0x0001`，群组 `0xC001`。固定使用 NetKey index 0 / AppKey index 0。所有多字节字段显式小端，禁止直接发送 C++ 内存结构。
+
+当前能力为 `revision=4, features=0x05FF`，并声明逐任务标定能力 `0x0200`。V3/V4 主从不可混装。
 
 `JobKey` = `epoch:u32 + id:u32`，两者都非零。epoch 在主节点每次启动时持久化递增；id 在请求正式接受前递增并保存。节点地址来自 Mesh 上下文，不在业务载荷内重复声明。
 
 | Op | 方向 | 载荷，按顺序 | 字节 |
 | --- | --- | --- | --- |
-| C0 PREPARE | 主→从，单播 | key, ml:u32, targetPulses:u32, k:u32, version:u32, maxMs:u32, speedFactorPermille:u16, leaseMs:u32, flags:u8 | 35 |
+| C0 PREPARE | 主→从，单播 | key, ml:u32, targetPulses:u32, k:u32, version:u32, maxMs:u32, speedFactorPermille:u16, leaseMs:u32, flags:u8, leaseFloor:u32 | 39 |
 | C1 START | 主→从，单播 | key | 8 |
-| C2 LEASE | 主→从，单播 | key, sequence:u32 | 12 |
+| C2 LEASE | 主→从，单播 | epoch:u32, sequence:u32 | 8 |
 | C3 CLOSE | 主→从，单播 | key, reason:u8 | 9 |
 | C4 RESULT_QUERY | 主→从，单播 | key，零值表示查询最近已保存结果 | 8 |
 | C5 RESULT | 从→主，单播 | key, pulses:u32, closePulses:u32, k:u32, revision:u32, phase:u8, reason:u8, flags:u8 | 27 |
@@ -21,12 +23,18 @@ Bluetooth Mesh Vendor CID `0x02E5`、Model ID `0x0001`，群组 `0xC001`。固�
 | CB HELLO_REPLY | 主→从 | epoch:u32, pumpFault:u8, schedulePhase:u8 | 6 |
 | CC COMMISSION | 主→从，单播 | request:u32 | 4 |
 | CD COMMISSION_REPLY | 从→主，单播 | request:u32, reply:u8, commissioned:u8, k:u32, version:u32 | 14 |
-| CE LEASE_ACK | 从→主，单播 | key, sequence:u32, reply:u8 | 13 |
+| CE LEASE_ACK OK | 从→主，单播 | epoch:u32, sequence:u32；长度 8 表示 OK | 8 |
+| CE LEASE_ACK 拒绝 | 从→主，单播 | epoch:u32, sequence:u32, reply:u8（非 OK） | 9 |
 | CF COMMAND_ACK | 从→主，单播 | key, command:u8, reply:u8 | 10 |
 | D0 CAPABILITIES_GET | 主→从，单播 | nonce:u32 | 4 |
 | D1 CAPABILITIES | 从→主，单播 | nonce:u32, revision:u16, features:u16, buildId:u32 | 12 |
+| D2 TARGET_CLOSED | 从→主，单播 | key，仅证明 Target 输出关阀 | 8 |
+| D3 TARGET_CLOSED_ACK | 主→从，单播 | key | 8 |
+| D4 PREPARE_OK | 从→主，单播 | key | 8 |
+| D5 START_OK | 从→主，单播 | key | 8 |
+| D6 PROGRESS | 从→主，单播 | key, pulses:u32, runtimeMs:u32 | 16 |
 
-业务载荷之外还有 opcode、MIC 和 Mesh 层开销；业务载荷超过 8 字节时由当前传输层按分段报文处理。配置提供 16 个 RX 分段上下文、8 个 TX 上下文；它们不构成 32 节点吞吐保证。C6 不再发送任何周期流量摘要。
+PREPARE flags bit0 表示使用任务 K，bit1 启用实时 D6 快照；未知位拒绝。D6 只发往从机保存的主节点单播地址，不发往 C001 群组或其他广播地址。载荷固定 16 字节：`JobKey(8) + pulses:u32 + runtimeMs:u32`，每约 2 秒在阀门打开期间发送；它是可丢弃的监控数据，不确认且不影响阀门控制。业务载荷之外还有 opcode、MIC 和 Mesh 层开销；业务载荷超过 8 字节时由当前传输层按分段报文处理。配置提供 16 个 RX 分段上下文、8 个 TX 上下文；它们不构成 32 节点吞吐保证。C6 不再发送周期流量摘要。
 
 从机阶段枚举顺序由 `include/protocol.h` 定义：`Idle, Prepared, Opening, Running, Settling, Done, Fault`。RESULT 的 phase 只能是 `Done` 或 `Fault`；bit0=阀门输出命令、bit1=已满足静默窗口、bit2=结算截断。主机只接受阀门输出已关闭且未知 flag 未置位的终态。revision 随状态变化递增；普通脉冲计数变化不增加 revision。主机按 `JobKey + revision` 去重并回传 RESULT_ACK。
 

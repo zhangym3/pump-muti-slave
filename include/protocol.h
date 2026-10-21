@@ -12,7 +12,12 @@ constexpr uint16_t AllSlaves = 0xC001;
 constexpr uint32_t LeaseMs = 12000;
 constexpr uint32_t CriticalQueueTtlMs = 8000;
 constexpr uint32_t TelemetryMs = 0; // Runtime SUMMARY/STATUS telemetry is removed in revision 3.
-constexpr uint16_t ProtocolRevision = 4, RequiredFeatures = 0x01FF;
+constexpr uint16_t ProtocolRevision = 4, RequiredFeatures = 0x05FF;
+constexpr uint16_t JobCalibrationFeature = 0x0200;
+constexpr uint8_t PrepareCalibrated = 0x01; // Authenticated master supplies this job's K.
+constexpr uint16_t LiveTelemetryFeature = 0x0400;
+constexpr uint8_t PrepareLiveTelemetry = 0x02;
+constexpr uint32_t LiveTelemetryMs = 2000;
 constexpr uint16_t SpeedLowPermille = 500, SpeedMediumPermille = 750, SpeedHighPermille = 1000;
 struct JobKey {
   uint32_t epoch = 0, id = 0;
@@ -32,7 +37,8 @@ enum class Op : uint8_t { Prepare = 0xC0, Start, Lease, Close,
   ReservedSummary, Summary = ReservedSummary,
   ResultAck, EventAck = ResultAck,
   Request, Response, Hello, HelloReply, Commission, CommissionReply,
-  LeaseAck, CommandAck, CommandReply = CommandAck, CapabilitiesGet, Capabilities, TargetClosed, TargetClosedAck, PrepareOK, StartOK };
+  LeaseAck, CommandAck, CommandReply = CommandAck, CapabilitiesGet, Capabilities, TargetClosed, TargetClosedAck,
+  PrepareOK, StartOK, Progress };
 enum class Action : uint8_t { Start = 1, Stop, Query };
 
 // All multibyte wire fields are explicitly little endian. Never memcpy C++ structs.
@@ -73,6 +79,7 @@ inline bool controlFormat(const Packet &p) {
     case Op::CommandAck: return p.size == 10 &&
       (p.bytes[8] == uint8_t(Op::Prepare) || p.bytes[8] == uint8_t(Op::Start)) &&
       p.bytes[9] > 0 && p.bytes[9] <= uint8_t(Reply::Unknown);
+    case Op::Progress: return p.size == 16;
     default: return true;
   }
 }

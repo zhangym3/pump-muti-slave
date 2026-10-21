@@ -40,7 +40,7 @@ void Application::incoming(const Packet &packetIn, uint32_t now) {
       const uint32_t nonce=reader.u32(); if (!reader.done() || !nonce) return;
       auto reply=packet(Op::Capabilities,store_.state().master); Writer w{reply};
       w.u32(nonce); w.u16(ProtocolRevision);
-      w.u16(mesh_.healthy() && !valve_.transportFault() ? RequiredFeatures : 0); w.u32(PUMP_BUILD_ID);
+      w.u16(mesh_.healthy() && !valve_.transportFault() ? RequiredFeatures | JobCalibrationFeature : 0); w.u32(PUMP_BUILD_ID);
       mesh_.send(reply); break;
     }
     case Op::HelloReply: {
@@ -232,7 +232,7 @@ void Application::command(CommandLine &line, uint32_t) {
     if (!store_.write(next)) { storageHealthy_ = false; gateway_.publish("STORAGE"); return; }
     mesh_.master(next.master); masterEpoch_ = 0; gateway_.publish("OK master"); return;
   }
-  gateway_.publish("HELP hello | local | hall | mesh-diag | estop | k PULSES_PER_ML | master ADDR");
+  gateway_.publish("HELP hello | local | hall | mesh-diag | estop | k PULSES_PER_1000_ML | master ADDR");
 }
 
 void Application::periodic(uint32_t now) {
@@ -268,8 +268,9 @@ void Application::periodic(uint32_t now) {
 
 void Application::run() {
   esp_task_wdt_add(nullptr);
-  ESP_LOGI("build", "id=%08lx protocol=%u features=%04x tracked=1",(unsigned long)PUMP_BUILD_ID,ProtocolRevision,RequiredFeatures);
+  ESP_LOGI("build", "id=%08lx protocol=%u features=%04x tracked=1",(unsigned long)PUMP_BUILD_ID,ProtocolRevision,RequiredFeatures | JobCalibrationFeature);
   uint32_t previousTick=nowMs(), maxTick=0, diagnosticAt=previousTick;
+  uint32_t reportedMeshFaults=0;
   bool previousOutput=false;
   const uint32_t boot = nowMs();
   helloAt_ = boot - 9000 + (mesh_.address() % 32) * 19;
@@ -290,16 +291,20 @@ void Application::run() {
     if (interval>maxTick) maxTick=interval;
     if (elapsed(now,diagnosticAt,10000)) {
       const auto m=mesh_.metrics(); diagnosticAt=now;
-      ESP_LOGI("mesh_diag", "healthy=%u submitted=%lu ended=%lu merged=%lu expired=%lu faults=%lu hello_timeout=%lu peak_sar=%u peak_pending=%u sar_max_ms=%lu tick_max_ms=%lu trace_lost=%lu",
+      ESP_LOGD("mesh_diag", "healthy=%u submitted=%lu ended=%lu merged=%lu expired=%lu faults=%lu hello_timeout=%lu peak_sar=%u peak_pending=%u sar_max_ms=%lu tick_max_ms=%lu trace_lost=%lu",
         mesh_.healthy(),(unsigned long)m.submitted,(unsigned long)m.ended,(unsigned long)m.merged,(unsigned long)m.expired,
         (unsigned long)m.faults,(unsigned long)m.helloTimeouts,m.peakSar,m.peakPending,(unsigned long)m.maxSarMs,(unsigned long)maxTick,(unsigned long)m.traceLost);
-      publishMeshDiagnostics(mesh_.diagnostics(),mesh_.healthy(),[](const char *line) { ESP_LOGI("mesh_state","%s",line); });
-      ESP_LOGI("runtime_mem", "heap_free=%lu heap_min=%lu largest_free=%lu app_stack_min_bytes=%lu",
+      if (m.faults != reportedMeshFaults) {
+        reportedMeshFaults=m.faults;
+        publishMeshDiagnostics(mesh_.diagnostics(),mesh_.healthy(),[](const char *line) { ESP_LOGW("mesh_state","%s",line); });
+      }
+      ESP_LOGD("runtime_mem", "heap_free=%lu heap_min=%lu largest_free=%lu app_stack_min_bytes=%lu",
         (unsigned long)esp_get_free_heap_size(),(unsigned long)esp_get_minimum_free_heap_size(),
         (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
         (unsigned long)uxTaskGetStackHighWaterMark(nullptr));
     }
     valve_.tick(now);
+    if (!valve_.output()) mesh_.retire(store_.state().master,valve_.status().key,Op::Progress);
     session_.poll(store_.state().master,(mesh_.address()-2)%5,now,[&](const Packet &p) { return mesh_.send(p); });
     // Preserve a terminal snapshot before PREPARE can replace the completed job.
     hallDiagnostics(nowMs());

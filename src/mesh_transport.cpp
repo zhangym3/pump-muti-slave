@@ -44,6 +44,7 @@ esp_ble_mesh_model_op_t operations[] = {
   {ESP_BLE_MESH_MODEL_OP_3(0xD3, CompanyId), 8, 0},
   {ESP_BLE_MESH_MODEL_OP_3(0xD4, CompanyId), 8, 0},
   {ESP_BLE_MESH_MODEL_OP_3(0xD5, CompanyId), 8, 0},
+  {ESP_BLE_MESH_MODEL_OP_3(0xD6, CompanyId), 16, 0},
   ESP_BLE_MESH_MODEL_OP_END
 };
 esp_ble_mesh_model_t sigModels[] = { ESP_BLE_MESH_MODEL_CFG_SRV(&config) };
@@ -78,7 +79,7 @@ void modelCb(esp_ble_mesh_model_cb_event_t event, esp_ble_mesh_model_cb_param_t 
   if (!m.ctx || m.ctx->net_idx != 0 || m.ctx->app_idx != 0 ||
       m.length > sizeof(Packet::bytes) || (m.opcode & 0xFFFF) != CompanyId) return;
   const uint8_t code = uint8_t(m.opcode >> 16);
-  if (code < uint8_t(Op::Prepare) || code > uint8_t(Op::StartOK)) return;
+  if (code < uint8_t(Op::Prepare) || code > uint8_t(Op::Progress)) return;
   auto in = packet(Op(code), m.ctx->addr);
   in.size = uint8_t(m.length);
   memcpy(in.bytes, m.msg, in.size);
@@ -178,6 +179,7 @@ void MeshTransport::incoming(const Packet &p) {
   if (!controlFormat(p)) return;
   // A slave accepts application traffic only from its persisted master address.
   if (!p.peer || p.peer != master_.load()) return;
+  if (p.op == Op::Progress) return;
   if (xQueueSend(urgent(p) ? urgentRx_ : rx_, &p, 0) != pdTRUE && urgent(p)) overflow_ = true;
 }
 bool MeshTransport::receive(Packet &p) {
@@ -206,7 +208,9 @@ void MeshTransport::worker() {
       MeshTxGovernor::Trace t;
       portENTER_CRITICAL(&txLock_); const bool found=tx_.takeTrace(t); portEXIT_CRITICAL(&txLock_);
       if (!found) break;
-      ESP_LOGI("mesh_tx", "t=%lu ticket=%lu peer=%04x op=%02x event=%u job=%lu:%lu seq=%lu rev=%lu issued=%lu age=%lu queued=%lu wait=%lu seg=%u err=%d",
+      // Drain traces even when DEBUG output is compiled out; keep fault evidence
+      // and trace-loss metrics independent of the console log level.
+      ESP_LOGD("mesh_tx", "t=%lu ticket=%lu peer=%04x op=%02x event=%u job=%lu:%lu seq=%lu rev=%lu issued=%lu age=%lu queued=%lu wait=%lu seg=%u err=%d",
         (unsigned long)t.at,(unsigned long)t.ticket,t.peer,t.op,t.event,(unsigned long)t.job.epoch,
         (unsigned long)t.job.id,(unsigned long)t.sequence,(unsigned long)t.revision,(unsigned long)t.issuedAt,
         (unsigned long)(t.at-t.issuedAt),(unsigned long)t.queuedAt,(unsigned long)(t.issuedAt-t.queuedAt),t.segmented,t.error);
@@ -214,7 +218,7 @@ void MeshTransport::worker() {
     const uint32_t memoryNow=uint32_t(esp_timer_get_time()/1000);
     if (elapsed(memoryNow,memoryAt,10000)) {
       memoryAt=memoryNow;
-      ESP_LOGI("runtime_mem", "mesh_stack_min_bytes=%lu",(unsigned long)uxTaskGetStackHighWaterMark(nullptr));
+      ESP_LOGD("runtime_mem", "mesh_stack_min_bytes=%lu",(unsigned long)uxTaskGetStackHighWaterMark(nullptr));
     }
     vTaskDelay(pdMS_TO_TICKS(5));
   }
