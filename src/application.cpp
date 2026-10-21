@@ -273,6 +273,8 @@ void Application::run() {
   uint32_t reportedMeshFaults=0;
   bool previousOutput=false;
   const uint32_t boot = nowMs();
+  bool resetPending = false;
+  uint32_t resetAttemptAt = boot - 1000;
   helloAt_ = boot - 9000 + (mesh_.address() % 32) * 19;
   char ready[160];
   snprintf(ready, sizeof(ready), "PUMP_MULTI_V1 ready role=VALVE_SLAVE commissioned=%u; type hello or local",
@@ -287,6 +289,29 @@ void Application::run() {
   TickType_t tick = xTaskGetTickCount();
   for (;;) {
     const uint32_t now = nowMs();
+    if (mesh_.takeReset()) {
+      valve_.emergency(Reason::Manual, now);
+      hw_.safeOff();
+      valve_.setCommissioned(false);
+      resetPending = true;
+    }
+    if (resetPending) {
+      // Do not execute queued commands after the network identity is removed.
+      // Restart clears old transport/session queues and enables PB-ADV at boot.
+      hw_.safeOff();
+      if (elapsed(now, resetAttemptAt, 1000)) {
+        resetAttemptAt = now;
+        if (store_.setCommissioned(false)) {
+          ESP_LOGI("mesh", "Node Reset: valve OFF, commissioning cleared; restarting for PB-ADV");
+          vTaskDelay(pdMS_TO_TICKS(1000));
+          esp_restart();
+        }
+        ESP_LOGE("mesh", "Node Reset commissioning save failed: valve OFF; retrying");
+      }
+      esp_task_wdt_reset();
+      vTaskDelay(pdMS_TO_TICKS(5));
+      continue;
+    }
     const uint32_t interval=now-previousTick; previousTick=now;
     if (interval>maxTick) maxTick=interval;
     if (elapsed(now,diagnosticAt,10000)) {

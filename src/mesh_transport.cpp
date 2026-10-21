@@ -54,6 +54,11 @@ esp_ble_mesh_comp_t composition;
 esp_ble_mesh_prov_t provisioning{};
 
 void provisionCb(esp_ble_mesh_prov_cb_event_t event, esp_ble_mesh_prov_cb_param_t *p) {
+  // Callback only signals the control task; output and NVS belong to that task.
+  if (event == ESP_BLE_MESH_NODE_PROV_RESET_EVT) {
+    if (instance) instance->nodeReset();
+    return;
+  }
   if (!p) return;
   if (event == ESP_BLE_MESH_NODE_PROV_ENABLE_COMP_EVT) {
     if (p->node_prov_enable_comp.err_code) {

@@ -1,5 +1,9 @@
 # ESP32-C3 Super Mini 从节点交接
 
+## 2026-10-21：配套单台删除（未刷写）
+
+已处理 Mesh Node Reset 事件：应用任务立即关阀并禁止旧业务执行，保存未启用状态后重启，重新进入 PB-ADV 待组网。主机为 ESP32-S3 N16R8，配套 APP 1.2.2。固件构建及 host tests 通过；本轮未刷写、未验证真实远程退网及重加。下文 PB-ADV 已刷写记录对应此前固件。
+
 ## 最新补充：PB-ADV 实板修复
 
 现场 C3 从机已修复默认 Bluedroid BLE 5.0 功能与当前 Mesh 传统扫描接口不匹配的问题：关闭 CONFIG_BT_BLE_50_FEATURES_SUPPORTED，启用 CONFIG_BT_BLE_42_FEATURES_SUPPORTED，同步默认与已生成配置，移除无效的延迟重试。已编译、烧录并验证无延迟 `node provisioning enabled (PB-ADV)`，USB hello/local 正常，阀门输出为 0。主机启动及再次重启后均可扫描到从机。固件包已更新；构建和串口日志保留在本地 `.pio` 目录，不纳入版本库。手机只连主机，通过“添加设备”查看从机标签；普通手机蓝牙列表不会出现此名称。尚未执行点击组网和水路验收。下文为此前拆分记录，“未烧录”“USB 待验证”不代表本轮最新结果。

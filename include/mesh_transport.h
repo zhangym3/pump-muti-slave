@@ -16,6 +16,8 @@ class MeshTransport final {
   void master(uint16_t m) { master_.store(m); }
   uint16_t master() const { return master_.load(); }
   bool takeOverflow() { return overflow_.exchange(false); }
+  bool takeReset() { return reset_.exchange(false); }
+  void nodeReset() { reset_ = true; }
   void incoming(const Packet &p);
   void worker();
   bool takeSubmission(MeshSubmission &out);
@@ -31,6 +33,7 @@ class MeshTransport final {
   mutable portMUX_TYPE txLock_ = portMUX_INITIALIZER_UNLOCKED;
   MeshTxGovernor tx_{1};
   std::atomic<bool> overflow_{false};
+  std::atomic<bool> reset_{false};
   std::atomic<uint16_t> master_{1};
 };
 }

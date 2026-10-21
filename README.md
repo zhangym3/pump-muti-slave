@@ -2,7 +2,9 @@
 
 当前目录 `D:/pump/pump-muti-slave` 只构建 ESP32-C3 阀门从节点，环境为 `valve_slave_c3`。PlatformIO 使用官方 `esp32-c3-devkitm-1` 的通用 C3 定义，按 Super Mini / 4MB Flash / DIO 40MHz 配置，ESP-IDF 5.4 / espressif32@6.10.0。
 
-主节点独立工程：`D:/pump/pump-muti`（经典 ESP32，pump_master）。本工程拥有独立源码、sdkconfig、编译缓存和打包脚本，不使用跨目录源码链接。
+主节点独立工程：`D:/pump/pump-muti`（ESP32-S3 N16R8，pump_master，PWM GPIO4）。本工程拥有独立源码、sdkconfig、编译缓存和打包脚本，不使用跨目录源码链接。
+
+2026-10-21：配套 APP 1.2.2 可在设备页单台删除从机。此版从机收到 Mesh Node Reset 后，在应用任务中关阀、保存 `commissioned=false` 并重启恢复 PB-ADV 待组网；不在蓝牙回调中写 NVS 或阻塞。保存失败时持续关阀并重试，不处理旧业务队列。重加后需重新启用配置，K 系数和任务持久数据保留。本次已构建及通过 host tests，未刷写或实机验证。离线删除只能确认主机本地移除，普通复位/长按 Reset 不清 Mesh。
 
 ## 引脚与 USB
 
