@@ -45,6 +45,7 @@ esp_ble_mesh_model_op_t operations[] = {
   {ESP_BLE_MESH_MODEL_OP_3(0xD4, CompanyId), 8, 0},
   {ESP_BLE_MESH_MODEL_OP_3(0xD5, CompanyId), 8, 0},
   {ESP_BLE_MESH_MODEL_OP_3(0xD6, CompanyId), 16, 0},
+  {ESP_BLE_MESH_MODEL_OP_3(0xD7, CompanyId), 8, 0},
   ESP_BLE_MESH_MODEL_OP_END
 };
 esp_ble_mesh_model_t sigModels[] = { ESP_BLE_MESH_MODEL_CFG_SRV(&config) };
@@ -84,14 +85,14 @@ void modelCb(esp_ble_mesh_model_cb_event_t event, esp_ble_mesh_model_cb_param_t 
   if (!m.ctx || m.ctx->net_idx != 0 || m.ctx->app_idx != 0 ||
       m.length > sizeof(Packet::bytes) || (m.opcode & 0xFFFF) != CompanyId) return;
   const uint8_t code = uint8_t(m.opcode >> 16);
-  if (code < uint8_t(Op::Prepare) || code > uint8_t(Op::Progress)) return;
+  if (code < uint8_t(Op::Prepare) || code > uint8_t(Op::MeasureMark)) return;
   auto in = packet(Op(code), m.ctx->addr);
   in.size = uint8_t(m.length);
   memcpy(in.bytes, m.msg, in.size);
   instance->incoming(in);
 }
 bool urgent(const Packet &p) {
-  return p.op == Op::TargetClosed || p.op == Op::TargetClosedAck || p.op == Op::PrepareOK || p.op == Op::StartOK || p.op == Op::Close || p.op == Op::Lease || p.op == Op::LeaseAck ||
+  return p.op == Op::TargetClosed || p.op == Op::TargetClosedAck || p.op == Op::PrepareOK || p.op == Op::StartOK || p.op == Op::Close || p.op == Op::Lease || p.op == Op::LeaseAck || p.op == Op::MeasureMark ||
     p.op == Op::ResultQuery || p.op == Op::ResultAck || p.op == Op::Result ||
     p.op == Op::CommandAck;
 }
@@ -143,6 +144,13 @@ bool MeshTransport::ready() const {
   if (!address()) return false;
   for (const auto key : vendorModels[0].keys) if (key == 0) return true;
   return false;
+}
+bool MeshTransport::provisioned() const { return esp_ble_mesh_node_is_provisioned(); }
+bool MeshTransport::localReset() {
+  if (!provisioned() || esp_ble_mesh_node_local_reset() != ESP_OK) return false;
+  // Start the safety path immediately; the SDK reset callback is idempotent.
+  reset_ = true;
+  return true;
 }
 uint16_t MeshTransport::address() const { return esp_ble_mesh_get_primary_element_address(); }
 bool MeshTransport::send(const Packet &p) {

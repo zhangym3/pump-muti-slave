@@ -11,6 +11,8 @@ class MeshTransport final {
   bool send(const Packet &p);
   bool receive(Packet &p);
   bool ready() const;
+  bool provisioned() const;
+  bool localReset();
   uint16_t address() const;
   const char *deviceName() const { return deviceName_; }
   void master(uint16_t m) { master_.store(m); }

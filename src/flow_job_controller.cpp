@@ -43,7 +43,8 @@ Reply FlowJobController::prepare(const Dose &d, uint32_t now) {
     if (d.ml != dose_.ml || d.pulses != dose_.pulses || d.k != dose_.k ||
         d.version != dose_.version || d.maxMs != dose_.maxMs ||
         d.leaseFloor != dose_.leaseFloor || d.leaseMs != dose_.leaseMs || d.speedFactorPermille != dose_.speedFactorPermille ||
-        d.calibrated != dose_.calibrated || d.liveTelemetry != dose_.liveTelemetry) return Reply::Conflict;
+        d.calibrated != dose_.calibrated || d.liveTelemetry != dose_.liveTelemetry ||
+        d.manualCalibration != dose_.manualCalibration) return Reply::Conflict;
     return s_.phase >= Phase::Prepared ? Reply::Ok : Reply::Stale;
   }
   if (!d.key.newer(fence_)) return Reply::Stale;
@@ -51,12 +52,16 @@ Reply FlowJobController::prepare(const Dose &d, uint32_t now) {
   if (storageFault_) return Reply::Storage;
   if (!cfg_.commissioned || !io_.interlock()) return Reply::NotReady;
   uint32_t expected = 0;
+  const bool doseValid = d.manualCalibration ?
+      d.ml >= 50 && d.ml <= 2000 && d.pulses == 0 && d.maxMs <= 60000 :
+      targetPulses(d.ml, d.k, expected) && d.pulses == expected && cfg_.preclose < d.pulses;
   if (!d.leaseFloor || !validSpeedFactor(d.speedFactorPermille) || !d.leaseMs || d.leaseMs > 60000 ||
-      !targetPulses(d.ml, d.k, expected) || d.pulses != expected || (!d.calibrated && d.k != cfg_.k) ||
+      !doseValid || !validK(d.k) || (!d.calibrated && d.k != cfg_.k) ||
       d.version != cfg_.version || !d.maxMs || d.maxMs > cfg_.maxRunMs ||
-      cfg_.preclose >= d.pulses) return Reply::Invalid;
+      (d.manualCalibration && !d.liveTelemetry)) return Reply::Invalid;
   if (!io_.saveFence(d.key)) { storageFault_ = true; return Reply::Storage; }
   fence_ = d.key; dose_ = d; s_ = {}; s_.key = d.key; s_.k = d.k;
+  measurementStart_ = 0; measurementMarked_ = false;
   s_.revision = revisionBase_;
   preparedAt_ = now; change(Phase::Prepared); return Reply::Ok;
 }
@@ -72,6 +77,16 @@ Reply FlowJobController::start(JobKey key, uint32_t now) {
   leaseSeq_ = lastCount_ = 0; s_.valveCommand = true;
   // Counting starts before energising; residual-pressure flow belongs to this dose.
   io_.valve(true); change(Phase::Opening); return Reply::Ok;
+}
+Reply FlowJobController::markMeasurement(JobKey key, uint32_t &pulses) {
+  if (!dose_.manualCalibration || key != s_.key || !s_.valveCommand ||
+      (s_.phase != Phase::Opening && s_.phase != Phase::Running)) return Reply::NotReady;
+  if (!measurementMarked_) {
+    measurementStart_ = io_.flow().pulses - baseline_;
+    measurementMarked_ = true;
+  }
+  pulses = measurementStart_;
+  return Reply::Ok;
 }
 Reply FlowJobController::compactLease(uint32_t epoch, uint32_t seq, uint32_t now) {
   if (epoch != s_.key.epoch) return Reply::Stale;
@@ -131,7 +146,7 @@ void FlowJobController::tick(uint32_t now) {
     if (!io_.interlock()) shut(Reason::LocalInterlock, now);
     else if (elapsed(now, leaseAt_, dose_.leaseMs)) shut(Reason::Lease, now);
     else if (elapsed(now, openedAt_, dose_.maxMs)) shut(Reason::Runtime, now);
-    else if (s_.pulses >= dose_.pulses - cfg_.preclose) shut(Reason::Target, now);
+    else if (!dose_.manualCalibration && s_.pulses >= dose_.pulses - cfg_.preclose) shut(Reason::Target, now);
     else if (!s_.pulses && elapsed(now, openedAt_, cfg_.startWaitMs)) shut(Reason::NoFlow, now);
     else if (s_.pulses && elapsed(now, lastPulseAt_, cfg_.noFlowMs)) shut(Reason::NoFlow, now);
     else if (s_.pulses && s_.phase == Phase::Opening) change(Phase::Running);

@@ -12,11 +12,13 @@ constexpr uint16_t AllSlaves = 0xC001;
 constexpr uint32_t LeaseMs = 12000;
 constexpr uint32_t CriticalQueueTtlMs = 8000;
 constexpr uint32_t TelemetryMs = 0; // Runtime SUMMARY/STATUS telemetry is removed in revision 3.
-constexpr uint16_t ProtocolRevision = 4, RequiredFeatures = 0x05FF;
+constexpr uint16_t ProtocolRevision = 5, RequiredFeatures = 0x05FF;
 constexpr uint16_t JobCalibrationFeature = 0x0200;
 constexpr uint8_t PrepareCalibrated = 0x01; // Authenticated master supplies this job's K.
 constexpr uint16_t LiveTelemetryFeature = 0x0400;
+constexpr uint16_t ManualCalibrationFeature = 0x0800;
 constexpr uint8_t PrepareLiveTelemetry = 0x02;
+constexpr uint8_t PrepareManualCalibration = 0x04;
 constexpr uint32_t LiveTelemetryMs = 2000;
 constexpr uint16_t SpeedLowPermille = 500, SpeedMediumPermille = 750, SpeedHighPermille = 1000;
 struct JobKey {
@@ -38,7 +40,7 @@ enum class Op : uint8_t { Prepare = 0xC0, Start, Lease, Close,
   ResultAck, EventAck = ResultAck,
   Request, Response, Hello, HelloReply, Commission, CommissionReply,
   LeaseAck, CommandAck, CommandReply = CommandAck, CapabilitiesGet, Capabilities, TargetClosed, TargetClosedAck,
-  PrepareOK, StartOK, Progress };
+  PrepareOK, StartOK, Progress, MeasureMark, MeasureMarkAck };
 enum class Action : uint8_t { Start = 1, Stop, Query };
 
 // All multibyte wire fields are explicitly little endian. Never memcpy C++ structs.
@@ -75,6 +77,9 @@ inline bool controlFormat(const Packet &p) {
     case Op::Prepare: return p.size == 39;
     case Op::Start: case Op::Lease: case Op::TargetClosed: case Op::TargetClosedAck:
     case Op::PrepareOK: case Op::StartOK: return p.size == 8;
+    case Op::MeasureMark: return p.size == 8;
+    case Op::MeasureMarkAck: return p.size == 13 &&
+      p.bytes[12] <= uint8_t(Reply::Unknown);
     case Op::LeaseAck: return p.size == 8 || (p.size == 9 && p.bytes[8] > 0 && p.bytes[8] <= uint8_t(Reply::Unknown));
     case Op::CommandAck: return p.size == 10 &&
       (p.bytes[8] == uint8_t(Op::Prepare) || p.bytes[8] == uint8_t(Op::Start)) &&

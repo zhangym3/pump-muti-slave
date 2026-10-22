@@ -1,5 +1,9 @@
 # ESP32-C3 Super Mini 从节点交接
 
+## 2026-10-22：已配对从机本地清 Mesh 恢复
+
+新增 USB 维护命令 `mesh-local-reset CONFIRM`。它要求节点已配网、阀门空闲且存储健康；调用 ESP-IDF 本地 Node Reset 后立即进入现有的关阀、清 `commissioned`、重启流程，重新开启 PB-ADV。只清 Mesh 网络凭据，不擦除任务记录、K 系数、从机主地址或其他 NVS。适用于主机已删除节点但从机没收到远程 Node Reset 的情形。先刷入包含该命令的从机固件，再连接 USB 执行；尚未进行实机测试。
+
 ## 2026-10-21：配套单台删除（未刷写）
 
 已处理 Mesh Node Reset 事件：应用任务立即关阀并禁止旧业务执行，保存未启用状态后重启，重新进入 PB-ADV 待组网。主机为 ESP32-S3 N16R8，配套 APP 1.2.2。固件构建及 host tests 通过；本轮未刷写、未验证真实远程退网及重加。下文 PB-ADV 已刷写记录对应此前固件。
@@ -45,7 +49,7 @@ python tools/package_firmware.py
 
 确认端口后使用 `pio run -e valve_slave_c3 -t upload --upload-port COMx`；不要使用主机 ESP32 镜像。原生 USB 下载/应用状态端口可能变化，需要时 BOOT+复位进入下载模式。
 
-维护命令走板载 USB：hello、local、master 实际主地址、k 实测系数、estop，均带换行。USB 回复等待在独立任务中有界，断开 USB 不影响控制任务继续运行。当前实现编译通过，原生 USB 输入输出仍待实板验收。
+维护命令走板载 USB：hello、local、master 实际主地址、k 实测系数、estop、`mesh-local-reset CONFIRM`，均带换行。USB 回复等待在独立任务中有界，断开 USB 不影响控制任务继续运行。当前实现编译通过；本地清 Mesh 命令仍待实板验收。
 
 ## 验证结果
 

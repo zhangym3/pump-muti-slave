@@ -14,7 +14,7 @@ struct Dose {
   uint32_t ml = 0, pulses = 0, k = 0, version = 0, maxMs = 0, leaseMs = LeaseMs;
   uint32_t leaseFloor = 1;
   uint16_t speedFactorPermille = SpeedHighPermille;
-  bool calibrated = false;
+  bool calibrated = false, manualCalibration = false;
   bool liveTelemetry = false;
 };
 class ValveIO {
@@ -33,6 +33,7 @@ class FlowJobController {
   void restore(const ValveStatus &result);
   Reply prepare(const Dose &dose, uint32_t now);
   Reply start(JobKey key, uint32_t now);
+  Reply markMeasurement(JobKey key, uint32_t &pulses);
   Reply compactLease(uint32_t epoch, uint32_t sequence, uint32_t now);
   Reply lease(JobKey key, uint32_t sequence, uint32_t now);
   void close(JobKey key, Reason reason, uint32_t now);
@@ -45,6 +46,7 @@ class FlowJobController {
   bool busy() const;
   bool output() const { return s_.valveCommand; }
   bool liveTelemetry() const { return dose_.liveTelemetry; }
+  bool manualCalibration() const { return dose_.manualCalibration; }
   uint32_t runtimeMs(uint32_t now) const { return uint32_t(now - openedAt_); }
   bool transportFault() const { return transportFault_; }
   ValveStatus status() const { return s_; }
@@ -61,5 +63,7 @@ class FlowJobController {
   uint32_t revisionBase_ = 0;
   uint32_t baseline_ = 0, preparedAt_ = 0, openedAt_ = 0, leaseAt_ = 0;
   uint32_t leaseSeq_ = 0, closedAt_ = 0, lastPulseAt_ = 0, lastCount_ = 0;
+  uint32_t measurementStart_ = 0;
+  bool measurementMarked_ = false;
 };
 }

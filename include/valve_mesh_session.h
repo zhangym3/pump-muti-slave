@@ -14,9 +14,10 @@ class ValveMeshSession {
       Dose d; d.key=r.key(); d.ml=r.u32(); d.pulses=r.u32(); d.k=r.u32();
       d.version=r.u32(); d.maxMs=r.u32(); d.speedFactorPermille=r.u16(); d.leaseMs=r.u32();
       const auto flags=r.u8(); d.leaseFloor=r.u32();
-      if (!r.done() || (flags & ~(PrepareCalibrated | PrepareLiveTelemetry))) return false;
+      if (!r.done() || (flags & ~(PrepareCalibrated | PrepareLiveTelemetry | PrepareManualCalibration))) return false;
       d.calibrated=(flags & PrepareCalibrated)!=0;
       d.liveTelemetry=(flags & PrepareLiveTelemetry)!=0;
+      d.manualCalibration=(flags & PrepareManualCalibration)!=0;
       const auto result=!healthy ? Reply::NotReady : !storage ? Reply::Storage : valve_.prepare(d,now);
       if (result==Reply::Ok) reset(d.key);
       if (result!=Reply::Ok || !preparePassed_) command(p.peer,d.key,Op::Prepare,result,send);
@@ -41,6 +42,11 @@ class ValveMeshSession {
     } else if (p.op==Op::TargetClosedAck) {
       const auto key=r.key();
       if (key==valve_.status().key) { reset(key); closedAck_=true; retire(p.peer,key,Op::TargetClosed); }
+    } else if (p.op==Op::MeasureMark) {
+      const auto key=r.key(); if (!r.done()) return false;
+      uint32_t pulses=0;
+      const auto result=valve_.markMeasurement(key,pulses);
+      auto ack=packet(Op::MeasureMarkAck,p.peer); Writer w{ack}; w.key(key); w.u32(pulses); w.u8(uint8_t(result)); send(ack);
     } else return false;
     return true;
   }

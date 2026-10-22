@@ -40,7 +40,7 @@ void Application::incoming(const Packet &packetIn, uint32_t now) {
       const uint32_t nonce=reader.u32(); if (!reader.done() || !nonce) return;
       auto reply=packet(Op::Capabilities,store_.state().master); Writer w{reply};
       w.u32(nonce); w.u16(ProtocolRevision);
-      w.u16(mesh_.healthy() && !valve_.transportFault() ? RequiredFeatures | JobCalibrationFeature : 0); w.u32(PUMP_BUILD_ID);
+      w.u16(mesh_.healthy() && !valve_.transportFault() ? RequiredFeatures | JobCalibrationFeature | ManualCalibrationFeature : 0); w.u32(PUMP_BUILD_ID);
       mesh_.send(reply); break;
     }
     case Op::HelloReply: {
@@ -180,7 +180,7 @@ void Application::meshState() {
   publishMeshDiagnostics(mesh_.diagnostics(),mesh_.healthy(),[&](const char *line) { gateway_.publish(line); });
 }
 
-void Application::command(CommandLine &line, uint32_t) {
+void Application::command(CommandLine &line, uint32_t now) {
   char *tokens[4] = {};
   size_t count = 0;
   char *save = nullptr;
@@ -204,6 +204,21 @@ void Application::command(CommandLine &line, uint32_t) {
   if (!strcmp(op, "local") && count == 1) { localState(nowMs()); return; }
   if (!strcmp(op, "hall") && count == 1) { hallState(nowMs(), "query"); return; }
   if (!strcmp(op, "mesh-diag") && count == 1) { meshState(); return; }
+  if (!strcmp(op, "mesh-local-reset")) {
+    if (line.bluetooth) { gateway_.publish("UNSUPPORTED transport"); return; }
+    if (count != 2 || strcmp(tokens[1], "CONFIRM")) {
+      gateway_.publish("USAGE mesh-local-reset CONFIRM"); return;
+    }
+    if (!storageHealthy_) { gateway_.publish("STORAGE mesh-local-reset"); return; }
+    if (valve_.busy() || valve_.output()) { gateway_.publish("BUSY mesh-local-reset"); return; }
+    if (!mesh_.provisioned()) { gateway_.publish("NOT_PROVISIONED mesh-local-reset"); return; }
+    if (!mesh_.localReset()) { gateway_.publish("MESH_RESET_FAILED"); return; }
+    valve_.emergency(Reason::Manual, now);
+    hw_.safeOff();
+    valve_.setCommissioned(false);
+    gateway_.publish("MESH_RESET_REQUESTED valve=OFF credentials=clearing");
+    return;
+  }
   if (!strcmp(op, "estop") && count == 1) {
     valve_.emergency(Reason::LocalInterlock, nowMs());
     status(true); gateway_.publish("LOCAL_STOP"); return;
@@ -232,7 +247,7 @@ void Application::command(CommandLine &line, uint32_t) {
     if (!store_.write(next)) { storageHealthy_ = false; gateway_.publish("STORAGE"); return; }
     mesh_.master(next.master); masterEpoch_ = 0; gateway_.publish("OK master"); return;
   }
-  gateway_.publish("HELP hello | local | hall | mesh-diag | estop | k PULSES_PER_1000_ML | master ADDR");
+  gateway_.publish("HELP hello | local | hall | mesh-diag | mesh-local-reset CONFIRM | estop | k PULSES_PER_1000_ML | master ADDR");
 }
 
 void Application::periodic(uint32_t now) {

@@ -1,5 +1,7 @@
 # 阀门从节点工程（ESP32-C3 Super Mini）
 
+2026-10-22：新增 USB 维护命令 `mesh-local-reset CONFIRM`，用于主机删除未收到从机退网确认、从机仍保存旧 Mesh 凭据而无法再次被扫描的恢复场景。仅在阀门空闲、存储健康、节点已配网时接受；成功后立即关阀，清除 Mesh 凭据和启用状态并重启进入 PB-ADV。任务记录、K 系数和主机地址保留；更换主机后需用 `master ADDR` 更新主机单播地址。普通复位/长按 Reset 不清 Mesh。该命令需先刷入包含本功能的固件，尚未实机验证。
+
 当前目录 `D:/pump/pump-muti-slave` 只构建 ESP32-C3 阀门从节点，环境为 `valve_slave_c3`。PlatformIO 使用官方 `esp32-c3-devkitm-1` 的通用 C3 定义，按 Super Mini / 4MB Flash / DIO 40MHz 配置，ESP-IDF 5.4 / espressif32@6.10.0。
 
 主节点独立工程：`D:/pump/pump-muti`（ESP32-S3 N16R8，pump_master，PWM GPIO4）。本工程拥有独立源码、sdkconfig、编译缓存和打包脚本，不使用跨目录源码链接。
@@ -35,7 +37,7 @@ python tools/package_firmware.py
 
 需刷写时先核对实际端口，再执行 `pio run -e valve_slave_c3 -t upload --upload-port COMx`。若不能进入下载，按住 BOOT，复位/重新上电后释放；下载及应用状态端口可能变化。最新 PB-ADV 修复已烧录到 COM6，详见 HANDOVER。
 
-原生 USB 上的启动日志及 `hello` / `local` / `master 0001` / `k 实测值` / `estop` 维护命令已经接入 USB Serial/JTAG 驱动。PlatformIO 串口监视器设 115200，命令带换行；未接电脑时 USB 等待不会阻塞控制任务。COM6 已验证启动日志和 hello/local 回复，其余维护命令需按实际维护需要验证。
+原生 USB 上的启动日志及 `hello` / `local` / `master 0001` / `k 实测值` / `estop` / `mesh-local-reset CONFIRM` 维护命令已经接入 USB Serial/JTAG 驱动。PlatformIO 串口监视器设 115200，命令带换行；未接电脑时 USB 等待不会阻塞控制任务。清 Mesh 是破坏性网络操作，只在确认节点空闲并需要重新配网时使用；COM6 已验证启动日志和 hello/local 回复，新命令尚未实机验证。
 
 ## 与主节点配网
 

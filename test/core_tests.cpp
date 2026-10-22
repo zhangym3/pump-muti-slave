@@ -1,7 +1,9 @@
 #include "flow_job_controller.h"
+#include "valve_mesh_session.h"
 #include "control_request.h"
 #include <cstdio>
 #include <cstdlib>
+#include <vector>
 #include <initializer_list>
 using namespace pump;
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #x); std::exit(1); } } while (false)
@@ -57,6 +59,44 @@ void job_calibration() {
     valve.tick(5600); CHECK(!io.on); // No START, no opening.
   }
   std::puts("PASS job K selection, duplicate identity, target cutoff, historical K, invalid K/target/version");
+}
+void manual_flow_calibration_marks_and_settles() {
+  FakeValve io; FlowJobController valve(io,config()); valve.boot({});
+  const JobKey key{1,2};
+  auto d=dose(key); d.ml=500; d.pulses=0; d.maxMs=60000;
+  d.manualCalibration=true; d.liveTelemetry=true;
+  io.reading.pulses=100;
+  CHECK(valve.prepare(d,0)==Reply::Ok);
+  CHECK(valve.start(key,2)==Reply::Ok && io.on);
+
+  io.reading.pulses=1100; valve.tick(20);
+  CHECK(io.on && valve.status().pulses==1000); // The saved K target cannot stop a manual sample.
+
+  ValveMeshSession mesh(valve); std::vector<Packet> replies;
+  auto send=[&](const Packet &p) { replies.push_back(p); return true; };
+  auto retire=[](uint16_t,JobKey,Op) {};
+  auto mark=packet(Op::MeasureMark,0x1234); Writer markWriter{mark}; markWriter.key(key);
+  CHECK(mesh.handle(mark,20,true,true,send,retire));
+  CHECK(replies.size()==1 && replies.back().op==Op::MeasureMarkAck && replies.back().peer==0x1234);
+  CHECK(controlFormat(replies.back()) && replies.back().size==13);
+  Reader ack{replies.back()}; CHECK(ack.key()==key && ack.u32()==1000 && ack.u8()==uint8_t(Reply::Ok) && ack.done());
+
+  io.reading.pulses=1200; valve.tick(30);
+  CHECK(mesh.handle(mark,30,true,true,send,retire));
+  Reader duplicate{replies.back()}; CHECK(duplicate.key()==key && duplicate.u32()==1000);
+  CHECK(duplicate.u8()==uint8_t(Reply::Ok) && duplicate.done());
+
+  valve.close(key,Reason::Manual,40);
+  CHECK(!io.on && valve.status().phase==Phase::Settling && valve.status().closePulses==1100);
+  io.reading.pulses=1215; valve.tick(100); valve.tick(600);
+  const auto result=valve.status();
+  CHECK(result.phase==Phase::Done && result.reason==Reason::Manual && result.quiet && !result.truncated);
+  CHECK(result.closePulses==1100 && result.pulses==1115);
+  CHECK(result.closePulses-1000==100 && result.pulses-result.closePulses==15);
+
+  FakeValve disabledIo; FlowJobController disabled(disabledIo,config()); disabled.boot({});
+  d.liveTelemetry=false;
+  CHECK(disabled.prepare(d,0)==Reply::Invalid && !disabledIo.on);
 }
 void commission_gate() {
   FakeValve io; auto uncommissioned = config(); uncommissioned.commissioned = false;
@@ -146,4 +186,4 @@ void prepared_deadline_and_floor() {
   }
   std::puts("PASS prepared 19999/20000ms boundary, non-sliding duplicate and lease floor validation");
 }
-int main() { job_calibration(); prepared_deadline_and_floor(); target_and_tail(); validation_and_calibration(); commission_gate(); leases_and_interlock(); wire_contract_vectors(); transport_lock(); std::puts("PASS transport fault locks idle/prepared/open/terminal control until controlled restart"); std::puts("slave flow tests passed"); }
+int main() { job_calibration(); manual_flow_calibration_marks_and_settles(); prepared_deadline_and_floor(); target_and_tail(); validation_and_calibration(); commission_gate(); leases_and_interlock(); wire_contract_vectors(); transport_lock(); std::puts("PASS transport fault locks idle/prepared/open/terminal control until controlled restart"); std::puts("slave flow tests passed"); }
