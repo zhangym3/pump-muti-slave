@@ -13,6 +13,8 @@ CONFIG_BTDM_CTRL_MODE_BLE_ONLY=y
 CONFIG_BLE_MESH=y
 CONFIG_BLE_MESH_NODE=y
 CONFIG_BLE_MESH_PB_ADV=y
+# Mesh duplicate filtering requires address AND content, not address alone.
+CONFIG_BT_CTRL_SCAN_DUPL_TYPE_DATA_DEVICE=y
 # The slave is provisioned by the Master over PB-ADV.  It is not a phone
 # GATT endpoint, so keep the GATT provisioning/proxy stack out of this role.
 CONFIG_BLE_MESH_PB_GATT=n

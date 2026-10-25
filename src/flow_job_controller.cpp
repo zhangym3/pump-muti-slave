@@ -1,7 +1,7 @@
 #include "flow_job_controller.h"
 namespace pump {
 bool FlowJobController::busy() const {
-  return s_.phase == Phase::Prepared || s_.phase == Phase::Opening ||
+  return localActive_ || s_.phase == Phase::Prepared || s_.phase == Phase::Opening ||
     s_.phase == Phase::Running || s_.phase == Phase::Settling;
 }
 void FlowJobController::change(Phase p) { s_.phase = p; ++s_.revision; }
@@ -9,6 +9,8 @@ void FlowJobController::boot(JobKey persisted, uint32_t revisionBase) {
   io_.valve(false); fence_ = persisted; s_ = {}; s_.k = cfg_.k; storageFault_ = false;
   revisionBase_ = s_.revision = revisionBase;
   transportFault_ = false;
+  localActive_ = localOn_ = false; localReason_ = Reason::None;
+  localBaseline_ = localPulses_ = localOpenedAt_ = localClosedAt_ = localLastPulseAt_ = 0;
   if (persisted.valid()) { s_.key = persisted; s_.reason = Reason::Reboot; s_.truncated = true; change(Phase::Fault); }
 }
 void FlowJobController::restore(const ValveStatus &result) {
@@ -38,6 +40,7 @@ Reply FlowJobController::canCommission() {
 }
 Reply FlowJobController::prepare(const Dose &d, uint32_t now) {
   if (transportFault_) return Reply::NotReady;
+  if (localActive_) return Reply::Busy;
   if (!d.key.valid()) return Reply::Invalid;
   if (d.key == s_.key) {
     if (d.ml != dose_.ml || d.pulses != dose_.pulses || d.k != dose_.k ||
@@ -67,6 +70,7 @@ Reply FlowJobController::prepare(const Dose &d, uint32_t now) {
 }
 Reply FlowJobController::start(JobKey key, uint32_t now) {
   if (transportFault_) return Reply::NotReady;
+  if (localActive_) return Reply::Busy;
   if (key != s_.key) return Reply::Stale;
   if (s_.phase == Phase::Opening || s_.phase == Phase::Running) return Reply::Ok;
   if (s_.phase != Phase::Prepared) return Reply::Stale;
@@ -116,6 +120,7 @@ void FlowJobController::shut(Reason reason, uint32_t now) {
   change(Phase::Settling);
 }
 void FlowJobController::close(JobKey key, Reason reason, uint32_t now) {
+  if (localActive_) { stopLocalHold(reason, now); return; }
   if (key == s_.key) { shut(reason, now); return; }
   // CLOSE can overtake PREPARE in a mesh. Persist a cancellation fence before
   // acknowledging it so delayed PREPARE/START cannot open this job after reboot.
@@ -130,9 +135,45 @@ void FlowJobController::close(JobKey key, Reason reason, uint32_t now) {
 }
 void FlowJobController::emergency(Reason r, uint32_t now) {
   if (r == Reason::Transport) transportFault_ = true;
+  stopLocalHold(r, now);
   shut(r, now);
 }
+Reply FlowJobController::startLocalHold(uint32_t now) {
+  if (transportFault_) return Reply::NotReady;
+  if (busy()) return Reply::Busy;
+  if (storageFault_) return Reply::Storage;
+  if (!cfg_.commissioned || !io_.interlock()) return Reply::NotReady;
+  if (!cfg_.localHoldMaxMs || !cfg_.maxRunMs) return Reply::Invalid;
+  localBaseline_ = io_.flow().pulses; localPulses_ = 0;
+  localOpenedAt_ = localLastPulseAt_ = now;
+  localReason_ = Reason::None; localActive_ = localOn_ = true;
+  io_.valve(true);
+  return Reply::Ok;
+}
+void FlowJobController::stopLocalHold(Reason reason, uint32_t now) {
+  if (!localOn_) return;
+  io_.valve(false); localOn_ = false; localReason_ = reason;
+  localPulses_ = io_.flow().pulses - localBaseline_;
+  localClosedAt_ = localLastPulseAt_ = now;
+}
+void FlowJobController::tickLocalHold(uint32_t now) {
+  const uint32_t pulses = io_.flow().pulses - localBaseline_;
+  if (pulses != localPulses_) localLastPulseAt_ = now;
+  localPulses_ = pulses;
+  if (localOn_) {
+    if (!cfg_.commissioned || !io_.interlock()) stopLocalHold(Reason::LocalInterlock, now);
+    else if (elapsed(now, localOpenedAt_, cfg_.localHoldMaxMs) ||
+             elapsed(now, localOpenedAt_, cfg_.maxRunMs)) stopLocalHold(Reason::Runtime, now);
+    else if ((!pulses && elapsed(now, localOpenedAt_, cfg_.startWaitMs)) ||
+             (pulses && elapsed(now, localLastPulseAt_, cfg_.noFlowMs))) stopLocalHold(Reason::NoFlow, now);
+  } else if (elapsed(now, localClosedAt_, cfg_.quietMs) && elapsed(now, localLastPulseAt_, cfg_.quietMs)) {
+    localActive_ = false;
+  } else if (elapsed(now, localClosedAt_, cfg_.settleLimitMs)) {
+    localReason_ = Reason::TailFlow; localActive_ = false;
+  }
+}
 void FlowJobController::tick(uint32_t now) {
+  if (localActive_) { tickLocalHold(now); return; }
   if (s_.phase == Phase::Prepared) {
     if (!io_.interlock()) shut(Reason::LocalInterlock, now);
     else if (elapsed(now, preparedAt_, cfg_.prepareMs)) shut(Reason::PrepareTimeout, now);

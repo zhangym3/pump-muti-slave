@@ -8,6 +8,7 @@ struct ValveConfig {
   uint32_t startWaitMs = 5000, noFlowMs = 1500, prepareMs = 20000;
   uint32_t quietMs = 500, settleLimitMs = 3000, maxRunMs = 240000;
   uint32_t leaseMs = LeaseMs;
+  uint32_t localHoldMaxMs = 60000;
 };
 struct Dose {
   JobKey key;
@@ -39,12 +40,18 @@ class FlowJobController {
   void close(JobKey key, Reason reason, uint32_t now);
   void emergency(Reason reason, uint32_t now);
   void tick(uint32_t now);
+  Reply startLocalHold(uint32_t now);
+  void stopLocalHold(Reason reason, uint32_t now);
+  bool localHoldBusy() const { return localActive_; }
+  bool localHoldOutput() const { return localOn_; }
+  uint32_t localHoldPulses() const { return localPulses_; }
+  Reason localHoldReason() const { return localReason_; }
   Reply configure(uint32_t k, uint32_t version);
   Reply canConfigure(uint32_t k, uint32_t version) const;
   Reply canCommission();
   void setCommissioned(bool value) { cfg_.commissioned = value; }
   bool busy() const;
-  bool output() const { return s_.valveCommand; }
+  bool output() const { return s_.valveCommand || localOn_; }
   bool liveTelemetry() const { return dose_.liveTelemetry; }
   bool manualCalibration() const { return dose_.manualCalibration; }
   uint32_t runtimeMs(uint32_t now) const { return uint32_t(now - openedAt_); }
@@ -54,6 +61,7 @@ class FlowJobController {
  private:
   void change(Phase p);
   void shut(Reason reason, uint32_t now);
+  void tickLocalHold(uint32_t now);
   ValveIO &io_;
   ValveConfig cfg_;
   ValveStatus s_;
@@ -65,5 +73,10 @@ class FlowJobController {
   uint32_t leaseSeq_ = 0, closedAt_ = 0, lastPulseAt_ = 0, lastCount_ = 0;
   uint32_t measurementStart_ = 0;
   bool measurementMarked_ = false;
+  // Local operation never consumes a Mesh job key or replaces its saved result.
+  bool localActive_ = false, localOn_ = false;
+  Reason localReason_ = Reason::None;
+  uint32_t localBaseline_ = 0, localPulses_ = 0, localOpenedAt_ = 0;
+  uint32_t localClosedAt_ = 0, localLastPulseAt_ = 0;
 };
 }

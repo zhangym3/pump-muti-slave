@@ -1,10 +1,12 @@
 # 阀门从节点工程（ESP32-C3 Super Mini）
 
+2026-10-25 基础候选：协议 revision 6 / RequiredFeatures `0x15FF`，配套主机最多五路同时定量。终态保存成功才发送结果；保存失败锁定新任务，不允许新 CLOSE/PREPARE 覆盖未保存计量。本轮离线测试和构建通过，未连接实机或烧录。交付状态见主机工程 `docs/BASIC_FIVE_OFFLINE_ACCEPTANCE_20261025.md`，历史 dist/台架记录不代表本轮验收。
+
 2026-10-22：新增 USB 维护命令 `mesh-local-reset CONFIRM`，用于主机删除未收到从机退网确认、从机仍保存旧 Mesh 凭据而无法再次被扫描的恢复场景。仅在阀门空闲、存储健康、节点已配网时接受；成功后立即关阀，清除 Mesh 凭据和启用状态并重启进入 PB-ADV。任务记录、K 系数和主机地址保留；更换主机后需用 `master ADDR` 更新主机单播地址。普通复位/长按 Reset 不清 Mesh。该命令需先刷入包含本功能的固件，尚未实机验证。
 
 当前目录 `D:/pump/pump-muti-slave` 只构建 ESP32-C3 阀门从节点，环境为 `valve_slave_c3`。PlatformIO 使用官方 `esp32-c3-devkitm-1` 的通用 C3 定义，按 Super Mini / 4MB Flash / DIO 40MHz 配置，ESP-IDF 5.4 / espressif32@6.10.0。
 
-主节点独立工程：`D:/pump/pump-muti`（ESP32-S3 N16R8，pump_master，PWM GPIO4）。本工程拥有独立源码、sdkconfig、编译缓存和打包脚本，不使用跨目录源码链接。
+主节点独立工程：`D:/pump/pump-muti`（ESP32-C3 Super Mini，pump_master，PWM GPIO4）。本工程拥有独立源码、sdkconfig、编译缓存和打包脚本，不使用跨目录源码链接。
 
 2026-10-21：配套 APP 1.2.2 可在设备页单台删除从机。此版从机收到 Mesh Node Reset 后，在应用任务中关阀、保存 `commissioned=false` 并重启恢复 PB-ADV 待组网；不在蓝牙回调中写 NVS 或阻塞。保存失败时持续关阀并重试，不处理旧业务队列。重加后需重新启用配置，K 系数和任务持久数据保留。本次已构建及通过 host tests，未刷写或实机验证。离线删除只能确认主机本地移除，普通复位/长按 Reset 不清 Mesh。
 
@@ -13,6 +15,7 @@
 | 连接 | Super Mini 丝印 / GPIO | 说明 |
 | --- | --- | --- |
 | 常闭阀驱动输入 | 4 / GPIO4 | 高有效，外部下拉；不能直接接阀线圈 |
+| 按住开阀轻触按键 | 3 / GPIO3 与 GND | 常开触点，内部上拉；需维护许可，按住开、松开关 |
 | 霍尔流量计脉冲 | 5 / GPIO5 | 下降沿计数，逻辑电平 3.3V |
 | 可选本地联锁输入 | 6 / GPIO6 | 当前禁用，不需要 GPIO6 跳线；安装真实联锁后可开启 |
 | 维护和下载 | 板载 USB | 原生 USB Serial/JTAG，底层 GPIO18/19 |
@@ -24,6 +27,14 @@
 `include/board_profile.h` 的 `SlaveInterlockEnabled=false` 适用于当前没有外部联锁的三线霍尔流量计安装，GPIO6 无需连接。以后安装真实联锁时改为 `true` 并重新烧录，按引脚文档提供 3.3V 许可及外部下拉。USB `local` 输出 `INTERLOCK enabled=0 ready=1 pin=6` 表示外部联锁未启用、软件许可放行。
 
 首次默认未启用，启用状态从 NVS 恢复。接线、驱动、K 系数标定和限值核对后，通过主机或 APP 显式“启用”并保存状态，无需修改 `commissioned` 默认值。主节点 Mesh 入网不会自动打开阀门。C3 上电/重启先置阀驱动低。
+
+执行定量或标定任务时，从机收到 START 后先将 GPIO4 置高，给常闭电磁阀驱动开阀信号，再回复 START_OK。配套新版主机收到有效开阀及租约确认，并为每路预留至少 300ms 后才启动水泵；需更新主机固件，本次从机报文和程序兼容。当前无阀位反馈，需按实阀核对动作时间。
+
+## 本地按住开阀
+
+GPIO3 与 GND 接四脚轻触开关的两组常开触点，先用万用表确认所选两脚未按断开、按下导通。GND 可与霍尔流量计通过分线端子共用。默认按住也不开阀；先在主机 USB 执行 `maintenance-enter ADDRhex CONFIRM` 并取得本从机本次启动的 60 秒许可，再释放并按住 30ms 开阀。松开在下一控制周期（目标 5ms）关阀；上电按住不会开。许可到期立即撤销并关阀，持续按住和迟到重复许可不能重开。结束由主机 `maintenance-exit CONFIRM` 确认全员关闭并退役，许可过期不自动解锁主机泵。
+
+须已显式启用、存储及传输健康，且无远程任务或尾流结算占用。只开本地阀，不启动主机水泵。保留首次 5 秒无流、1.5 秒断流、最长 60 秒和可选联锁保护；因保护停阀后，持续按住不会重开。关阀后需等待尾流结算完成再重新按下。远程任务忙时按键被拒绝，松开不会关闭该远程任务。USB `local` 输出 `BUTTON`（引脚、电平、局部忙、局部阀、脉冲、原因、总输出）；旧远程 `LOCAL` 结果不表示按键状态。本地操作不覆写远程任务结果，不额外写 NVS。详见 [接线](docs/PINOUT.md)。
 
 ## 构建与打包
 
@@ -45,7 +56,7 @@ python tools/package_firmware.py
 2. 手机连接 ESP32 Master，在设备页发起“让 Master 扫描附近从机”，选择候选后显式“连接组网”。
 3. Master 完成 PB-ADV 配网、Composition 校验、AppKey0/模型绑定、C001 订阅、HELLO 登记，等待 READY。
 4. 校准 K 后通过 USB 读取实际 K/版本，必要时同步 Master 的节点登记。首次自动登记不代表后续改 K 会自动覆盖登记。
-5. 完成现场启用后才进行阀门/水路验证。从机保留计量到量关闭、无流量超时、最大运行时长及 3 秒租约保护；外部联锁仅在 `SlaveInterlockEnabled=true` 时检查 GPIO6。
+5. 完成现场启用后才进行阀门/水路验证。从机保留计量到量关闭、首次无流 5 秒、断流 1.5 秒、最大运行 240 秒及 12 秒租约保护；主机任一路租约证明满 8 秒即整批停泵。外部联锁仅在 `SlaveInterlockEnabled=true` 时检查 GPIO6。
 
 从机没有手机业务 GATT/PIN 入口；Mesh 只使用 PB-ADV，PB-GATT 和 GATT Proxy 已关闭。`PUMP_SLAVE_XXXX` 只用于串口和 APP 候选项标识，不是手机普通蓝牙扫描名称。手机 PIN 只用于 Master，不作为 Mesh 密钥。新版 Master 启动流程会自动处理遗留 Node 角色并进入 Provisioner；手机不提供迁移步骤，也不自动擦除应用 NVS。确认主机 `capable=1 phase=IDLE` 后，再由 APP 请求扫描和组网。
 

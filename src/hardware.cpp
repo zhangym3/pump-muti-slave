@@ -30,6 +30,10 @@ static bool flowPin(int pin, PulseCounter *counter) {
 }
 bool Hardware::init() {
   safeOff();
+  gpio_config_t button{}; button.mode = GPIO_MODE_INPUT;
+  button.pin_bit_mask = 1ULL << board::HoldButton;
+  button.pull_up_en = GPIO_PULLUP_ENABLE;
+  if (gpio_config(&button) != ESP_OK) return false;
   if (gpio_install_isr_service(ESP_INTR_FLAG_IRAM) != ESP_OK) return false;
   if constexpr (board::SlaveInterlockEnabled) {
     gpio_config_t interlock{}; interlock.mode = GPIO_MODE_INPUT;
@@ -40,6 +44,7 @@ bool Hardware::init() {
 }
 FlowReading Hardware::flow() { return read(primary_); }
 int Hardware::flowLevel() const { return gpio_get_level(gpio_num_t(board::BranchFlow)); }
+bool Hardware::holdButtonPressed() const { return gpio_get_level(gpio_num_t(board::HoldButton)) == 0; }
 bool Hardware::interlock() {
   if constexpr (!board::SlaveInterlockEnabled) return true;
   return gpio_get_level(gpio_num_t(board::SlaveInterlock)) == 1;

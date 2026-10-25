@@ -11,6 +11,7 @@ module.prepare(env.PioPlatform().get_package_dir("framework-espidf"), root)
 
 import hashlib, json
 inputs = {}
+inputs["@environment"] = env["PIOENV"]
 for folder in ('include', 'src', 'tools/mesh_sdk'):
     for file in sorted((root / folder).rglob('*')):
         if file.is_file(): inputs[file.relative_to(root).as_posix()] = hashlib.sha256(file.read_bytes()).hexdigest()

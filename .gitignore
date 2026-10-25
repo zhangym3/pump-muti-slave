@@ -1,5 +1,7 @@
 .pio
 .mesh-sdk/
+.mesh-sdk-before-*/
+/compile_commands.json
 .mesh-sdk.*-backup-*/
 dist/
 .vscode/.browse.c_cpp.db*

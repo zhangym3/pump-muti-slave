@@ -5,14 +5,16 @@
 #include <cstring>
 
 namespace pump {
-constexpr size_t MaxNodes = 32;
+constexpr size_t MaxNodes = 32; // Deployed storage/mask ABI.
+constexpr size_t ProductMaxNodes = 5;
+inline unsigned nodeCount(uint32_t mask) { unsigned n=0; for (;mask;mask&=mask-1) ++n; return n; }
 constexpr uint16_t CompanyId = 0x02E5; // Espressif: development only; obtain own CID for production.
 constexpr uint16_t ModelId = 0x0001;
 constexpr uint16_t AllSlaves = 0xC001;
 constexpr uint32_t LeaseMs = 12000;
 constexpr uint32_t CriticalQueueTtlMs = 8000;
 constexpr uint32_t TelemetryMs = 0; // Runtime SUMMARY/STATUS telemetry is removed in revision 3.
-constexpr uint16_t ProtocolRevision = 5, RequiredFeatures = 0x05FF;
+constexpr uint16_t ProtocolRevision = 6, RequiredFeatures = 0x15FF;
 constexpr uint16_t JobCalibrationFeature = 0x0200;
 constexpr uint8_t PrepareCalibrated = 0x01; // Authenticated master supplies this job's K.
 constexpr uint16_t LiveTelemetryFeature = 0x0400;
@@ -40,7 +42,7 @@ enum class Op : uint8_t { Prepare = 0xC0, Start, Lease, Close,
   ResultAck, EventAck = ResultAck,
   Request, Response, Hello, HelloReply, Commission, CommissionReply,
   LeaseAck, CommandAck, CommandReply = CommandAck, CapabilitiesGet, Capabilities, TargetClosed, TargetClosedAck,
-  PrepareOK, StartOK, Progress, MeasureMark, MeasureMarkAck };
+  PrepareOK, StartOK, Progress, MeasureMark, MeasureMarkAck, ModeGet, NodeState, MaintenanceGrant, MaintenanceRetire };
 enum class Action : uint8_t { Start = 1, Stop, Query };
 
 // All multibyte wire fields are explicitly little endian. Never memcpy C++ structs.
@@ -74,6 +76,10 @@ inline Packet packet(Op op, uint16_t peer) { Packet p; p.op = op; p.peer = peer;
 // Strict V4 control lengths, shared by both receive paths and host tests.
 inline bool controlFormat(const Packet &p) {
   switch (p.op) {
+    case Op::ModeGet: return p.size==8;
+    case Op::NodeState: return p.size==14 && !(p.bytes[12]&0x80) && p.bytes[13]<=uint8_t(Reason::Protocol);
+    case Op::MaintenanceGrant: return p.size==16;
+    case Op::MaintenanceRetire: return p.size==12;
     case Op::Prepare: return p.size == 39;
     case Op::Start: case Op::Lease: case Op::TargetClosed: case Op::TargetClosedAck:
     case Op::PrepareOK: case Op::StartOK: return p.size == 8;

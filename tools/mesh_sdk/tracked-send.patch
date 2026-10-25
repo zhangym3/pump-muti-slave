@@ -88,7 +88,7 @@
  
  #if CONFIG_BLE_MESH_DEINIT
  static SemaphoreHandle_t deinit_comp_semaphore;
-@@ -2906,26 +2919,51 @@
+@@ -2906,26 +2921,51 @@
          break;
      }
      case BTC_BLE_MESH_ACT_SERVER_MODEL_SEND: {
@@ -162,10 +162,26 @@
      } model_send;
      struct ble_mesh_server_model_update_state_args {
          esp_ble_mesh_model_t *model;
+--- a/esp_ble_mesh/core/storage/settings.c
++++ b/esp_ble_mesh/core/storage/settings.c
+@@ -319 +319,5 @@
+-        return 0;
++        /* Older Provisioners did not save the initial sequence block.
++         * Skip it on restore too; do not reuse 0..STORE_RATE-2. This
++         * cannot recover arbitrary lost/corrupt sequence storage.
++         */
++        BT_WARN("Missing sequence checkpoint; skipping initial block");
+@@ -1632 +1636,5 @@
+-    if (CONFIG_BLE_MESH_SEQ_STORE_RATE &&
++    /* next_seq increments before calling us. Persist the first block
++     * as well as later boundaries, even for a fresh Provisioner which
++     * only stored IV state when its network was created.
++     */
++    if (CONFIG_BLE_MESH_SEQ_STORE_RATE && bt_mesh.seq != 1U &&
 --- /dev/null
 +++ b/esp_ble_mesh/api/core/include/esp_ble_mesh_tracked.h
 @@ -0,0 +1,23 @@
-+/* Project SDK extension, patch version pump-sar-2. */
++/* Project SDK extension, patch version pump-sar-3. */
 +#pragma once
 +#include "esp_ble_mesh_networking_api.h"
 +#ifdef __cplusplus

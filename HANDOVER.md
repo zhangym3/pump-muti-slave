@@ -1,5 +1,17 @@
 # ESP32-C3 Super Mini 从节点交接
 
+## 2026-10-25 当前软件候选（实机未验收）
+
+从机 `60d8ad44` 配套主机 `182ab692`，协议 V6、最多五路同时定量。终态保存成功后才允许 RESULT，保存失败锁定新任务且保留原计量；GPIO3 按钮默认禁开，须获主机 boot 绑定、最长 60 秒的维护许可，许可到期或退役关闭输出，主泵保持禁止。主从及固定 SDK 离线测试、固件构建通过，APP 137 项 JVM 测试通过。当前无实机测试条件，通信/出水/时序与完整 Application/NVS/RTOS 故障注入未验收。详见 [主机实施记录](../pump-muti/docs/BASIC_FIVE_OFFLINE_ACCEPTANCE_20261025.md)。下文均为历史时点记录。
+
+## 2026-10-23 深夜：主从配网实机诊断
+
+COM6 已烧录普通固件 `f0f1957d`，COM9 主机为 `56e9a678`，各自 dist 已更新，未清 NVS。从机普通与诊断环境改为 SDK 要求的 DATA_DEVICE 扫描去重；诊断中 PB-ADV 握手成功并获地址 `0003`，普通固件配置重试已完成 Composition 与 AppKey Add，但 Model App Bind 响应超时。随后后台 HELLO 曾到达，主机已登记 slot=1、从机 epoch 同步为 34；最后一次有限重试仍 Composition 超时，结束快照 online=1（此前为 0）、管理状态 CONFIG_TIMEOUT，尚未 READY/启用，不代表链路稳定。绑定请求可能已执行而响应丢失，不能把超时等同于从机未执行。当前从机 mesh=1、commissioned=0、valve_command=0。外设仍连接，两板 USB 供电，相距约 50 厘米；仅 USB 隔离对照暂无法进行，未确定硬件根因。此处实机进展优先于下文“未刷写”历史描述。完整证据见 [主机配网诊断](../pump-muti/docs/PAIRING_DIAGNOSIS_20261023.md)。
+
+## 2026-10-23：按住开阀与 C3 主机
+
+从机增加 GPIO3-GND 常开轻触按键，按住开阀、松开关阀；开机按住不启动，30ms 开启消抖，保留 5 秒首次无流、1.5 秒断流、60 秒上限、联锁及远程互斥。只开本地阀，不启动主泵。此前远程结果与 NVS 不被本地按键改写。主机同步迁移 ESP32-C3 Super Mini；接线见 docs/PINOUT.md，主机说明见 ../pump-muti/docs/ESP32_C3_MIGRATION.md。本轮未刷写；下文已刷写为历史固件记录。本机 `valve_slave_c3` 最终构建和 host tests 通过，静态 RAM 38,048B、程序 980,144B；已更新 dist 镜像/清单并核对 ESP32-C3/4MB 镜像头、分区及 SHA256。
+
 ## 2026-10-22：已配对从机本地清 Mesh 恢复
 
 新增 USB 维护命令 `mesh-local-reset CONFIRM`。它要求节点已配网、阀门空闲且存储健康；调用 ESP-IDF 本地 Node Reset 后立即进入现有的关阀、清 `commissioned`、重启流程，重新开启 PB-ADV。只清 Mesh 网络凭据，不擦除任务记录、K 系数、从机主地址或其他 NVS。适用于主机已删除节点但从机没收到远程 Node Reset 的情形。先刷入包含该命令的从机固件，再连接 USB 执行；尚未进行实机测试。

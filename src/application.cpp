@@ -18,9 +18,19 @@ void encodeStatus(Packet &p, const ValveStatus &s) {
 }
 }
 
+bool Application::commitResult() {
+  if (!resultCommit_.commit(valve_.status(), [&](const ValveStatus &s) { return store_.result(s); })) {
+    if (storageHealthy_) gateway_.publish("STORAGE result_pending outputs_locked");
+    storageHealthy_ = false;
+    return false;
+  }
+  return storageHealthy_;
+}
+
 bool Application::status(bool force) {
   const auto current = valve_.status();
   if (current.phase != Phase::Done && current.phase != Phase::Fault) return false;
+  if (!commitResult() || !resultCommit_.contains(current)) return false;
   if (!force && ackedKey_ == current.key && ackedRevision_ == current.revision) return false;
   auto packetOut = packet(Op::Result, store_.state().master);
   encodeStatus(packetOut, current);
@@ -30,8 +40,29 @@ bool Application::status(bool force) {
 void Application::incoming(const Packet &packetIn, uint32_t now) {
   if (packetIn.peer != store_.state().master) return;
   if (!controlFormat(packetIn)) return;
+  commitResult(); // Also covers a terminal state produced by a previous packet in this batch.
+  if (packetIn.op==Op::ModeGet || packetIn.op==Op::MaintenanceRetire || packetIn.op==Op::MaintenanceGrant) {
+    Reader r{packetIn}; const auto token=r.key();
+    if (!token.valid()) return;
+    if (packetIn.op==Op::MaintenanceGrant) {
+      const auto boot=r.u32(),ttl=r.u32();
+      const auto reason=valve_.localHoldReason();
+      if (storageHealthy_ && mesh_.healthy() && !valve_.transportFault() && !valve_.busy() &&
+          !hw_.holdButtonPressed() && elapsed(now,releaseAt_,board::HoldButtonDebounceMs) &&
+          elapsed(now,flowQuietAt_,valve_.config().quietMs) &&
+          (reason==Reason::None || reason==Reason::Manual)) {
+        maintenance_.grant(token,boot,ttl,now);
+      }
+    } else {
+      if (packetIn.op==Op::MaintenanceRetire) r.u32(); // Any new boot also rejects the old boot-bound grant.
+      maintenance_.retire(token);
+      valve_.stopLocalHold(Reason::Manual,now);
+    }
+    modeToken_=token; modeAt_=now; modeSentAt_=now-500;
+    modeState(token,now); return;
+  }
   const auto retire=[&](uint16_t peer,JobKey key,Op op) { mesh_.retire(peer,key,op); };
-  if (session_.handle(packetIn,now,mesh_.healthy(),storageHealthy_,[&](const Packet &p) { return mesh_.send(p); },retire)) {
+  if (session_.handle(packetIn,now,mesh_.healthy() && !maintenance_.allowed(now),storageHealthy_,[&](const Packet &p) { return mesh_.send(p); },retire)) {
     hallDiagnostics(nowMs()); return;
   }
   Reader reader{packetIn};
@@ -88,7 +119,7 @@ void Application::incoming(const Packet &packetIn, uint32_t now) {
       const JobKey key = reader.key();
       const Reason reason = Reason(reader.u8());
       if (reader.done() && reason <= Reason::Protocol) {
-        valve_.close(key, reason, now);
+        closePreservingResult(valve_,key,reason,now,storageHealthy_);
         status(true);
       }
       break;
@@ -135,6 +166,7 @@ void Application::localState(uint32_t now) {
   snprintf(line, sizeof(line), "INTERLOCK enabled=%u ready=%u pin=%d",
     board::SlaveInterlockEnabled, hw_.interlock(), board::SlaveInterlock);
   gateway_.publish(line);
+  buttonState();
   hallState(now, "query");
   meshState();
 }
@@ -162,12 +194,13 @@ void Application::hallState(uint32_t now, const char *event) {
   gateway_.publish(line);
   hallAt_ = now;
   hallCount_ = reading.pulses;
+  if (valve_.localHoldBusy()) buttonState();
 }
 
 void Application::hallDiagnostics(uint32_t now) {
   const auto current = valve_.status();
   const bool active = current.phase == Phase::Opening || current.phase == Phase::Running ||
-    current.phase == Phase::Settling;
+    current.phase == Phase::Settling || valve_.localHoldBusy();
   if (active != hallActive_) {
     hallState(now, active ? "start" : "final");
   } else if (elapsed(now, hallAt_, 1000) && (active || hw_.flow().pulses != hallCount_)) {
@@ -178,6 +211,55 @@ void Application::hallDiagnostics(uint32_t now) {
 
 void Application::meshState() {
   publishMeshDiagnostics(mesh_.diagnostics(),mesh_.healthy(),[&](const char *line) { gateway_.publish(line); });
+}
+
+void Application::buttonState() {
+  char line[160];
+  snprintf(line, sizeof(line), "BUTTON pin=%d pressed=%u local_busy=%u local_valve=%u local_pulses=%lu reason=%s output=%u",
+    board::HoldButton, hw_.holdButtonPressed(), valve_.localHoldBusy(), valve_.localHoldOutput(),
+    static_cast<unsigned long>(valve_.localHoldPulses()), reasonName(valve_.localHoldReason()), valve_.output());
+  gateway_.publish(line);
+}
+
+void Application::holdButton(uint32_t now) {
+  const auto event = holdButton_.update(hw_.holdButtonPressed(), now);
+  if (event == HoldButton::Event::Press) {
+    commitResult();
+    const Reply result = !storageHealthy_ ? Reply::Storage :
+      (!mesh_.healthy() || !maintenance_.allowed(now)) ? Reply::NotReady : valve_.startLocalHold(now);
+    char line[64];
+    snprintf(line, sizeof(line), "BUTTON_PRESS reply=%s", replyName(result));
+    gateway_.publish(line);
+  } else if (event == HoldButton::Event::Release) {
+    valve_.stopLocalHold(Reason::Manual, now);
+    gateway_.publish("BUTTON_RELEASE");
+  }
+  if (event != HoldButton::Event::None) buttonState();
+}
+
+void Application::modeState(JobKey token,uint32_t now) {
+  uint8_t flags=0;
+  if (maintenance_.allowed(now)) flags|=ModePermitted;
+  if (valve_.output()) flags|=ModeOutput;
+  if (valve_.busy()) flags|=ModeBusy;
+  if (hw_.holdButtonPressed() || !elapsed(now,releaseAt_,board::HoldButtonDebounceMs)) flags|=ModePressed;
+  if (elapsed(now,flowQuietAt_,valve_.config().quietMs)) flags|=ModeQuiet;
+  const auto reason=valve_.localHoldReason();
+  if (storageHealthy_ && mesh_.healthy() && !valve_.transportFault() && hw_.interlock() &&
+      (reason==Reason::None || reason==Reason::Manual)) flags|=ModeHealthy;
+  if (maintenance_.retired(token)) flags|=ModeRetired;
+  auto p=packet(Op::NodeState,store_.state().master); Writer w{p};
+  w.key(token); w.u32(maintenance_.bootId()); w.u8(flags); w.u8(uint8_t(reason));
+  if (mesh_.send(p)) modeSentAt_=now;
+}
+void Application::modeTick(uint32_t now) {
+  const auto pulses=hw_.flow().pulses;
+  if (pulses!=modeFlow_) { modeFlow_=pulses; flowQuietAt_=now; }
+  const bool pressed=hw_.holdButtonPressed();
+  if (pressed || modePressed_) releaseAt_=now;
+  modePressed_=pressed;
+  if (!maintenance_.allowed(now)) valve_.stopLocalHold(Reason::Manual,now);
+  if (modeToken_.valid() && !elapsed(now,modeAt_,15000) && elapsed(now,modeSentAt_,500)) modeState(modeToken_,now);
 }
 
 void Application::command(CommandLine &line, uint32_t now) {
@@ -210,7 +292,7 @@ void Application::command(CommandLine &line, uint32_t now) {
       gateway_.publish("USAGE mesh-local-reset CONFIRM"); return;
     }
     if (!storageHealthy_) { gateway_.publish("STORAGE mesh-local-reset"); return; }
-    if (valve_.busy() || valve_.output()) { gateway_.publish("BUSY mesh-local-reset"); return; }
+    if (valve_.busy() || valve_.output() || maintenance_.allowed(now)) { gateway_.publish("BUSY mesh-local-reset"); return; }
     if (!mesh_.provisioned()) { gateway_.publish("NOT_PROVISIONED mesh-local-reset"); return; }
     if (!mesh_.localReset()) { gateway_.publish("MESH_RESET_FAILED"); return; }
     valve_.emergency(Reason::Manual, now);
@@ -224,6 +306,7 @@ void Application::command(CommandLine &line, uint32_t now) {
     status(true); gateway_.publish("LOCAL_STOP"); return;
   }
   if (!strcmp(op, "k") && count == 2) {
+    if (maintenance_.allowed(now) || !storageHealthy_) { gateway_.publish("BUSY k"); return; }
     uint64_t k;
     if (!number(1, k) || k > 1000000 || !validK(uint32_t(k)) || store_.state().kVersion == UINT32_MAX) {
       gateway_.publish("INVALID k"); return;
@@ -242,7 +325,7 @@ void Application::command(CommandLine &line, uint32_t now) {
     if (!number(1, address, 16) || address > 0x7FFF || !unicast(uint16_t(address))) {
       gateway_.publish("INVALID master"); return;
     }
-    if (valve_.busy()) { gateway_.publish("BUSY master"); return; }
+    if (valve_.busy() || maintenance_.allowed(now) || !storageHealthy_) { gateway_.publish("BUSY master"); return; }
     auto next = store_.state(); next.master = uint16_t(address);
     if (!store_.write(next)) { storageHealthy_ = false; gateway_.publish("STORAGE"); return; }
     mesh_.master(next.master); masterEpoch_ = 0; gateway_.publish("OK master"); return;
@@ -253,12 +336,7 @@ void Application::command(CommandLine &line, uint32_t now) {
 void Application::periodic(uint32_t now) {
   session_.poll(store_.state().master,(mesh_.address()-2)%5,now,[&](const Packet &p) { return mesh_.send(p); });
   const auto current = valve_.status();
-  const bool final = current.phase == Phase::Done || current.phase == Phase::Fault;
-  if (final && (current.key != savedKey_ || current.revision != savedRevision_) && current.key.valid()) {
-    storageHealthy_ = store_.result(current);
-    savedKey_ = current.key;
-    savedRevision_ = current.revision;
-  }
+  commitResult();
   if (mesh_.ready() && elapsed(now, helloAt_, mesh_.healthy() ? 10000 : 3000)) {
     auto hello = packet(Op::Hello, store_.state().master);
     Writer writer{hello}; writer.u32(valve_.config().k); writer.u32(valve_.config().version);
@@ -288,6 +366,8 @@ void Application::run() {
   uint32_t reportedMeshFaults=0;
   bool previousOutput=false;
   const uint32_t boot = nowMs();
+  maintenance_.boot(store_.state().revisionBase);
+  flowQuietAt_=releaseAt_=boot; modeFlow_=hw_.flow().pulses;
   bool resetPending = false;
   uint32_t resetAttemptAt = boot - 1000;
   helloAt_ = boot - 9000 + (mesh_.address() % 32) * 19;
@@ -300,6 +380,7 @@ void Application::run() {
     "HALL_CONFIG pin=%d edge=falling pullup=1 min_us=%lu period_ms=1000",
     board::BranchFlow, static_cast<unsigned long>(board::HallMinEdgeUs));
   gateway_.publish(hallConfig);
+  buttonState();
   hallState(boot, "boot");
   TickType_t tick = xTaskGetTickCount();
   for (;;) {
@@ -343,23 +424,28 @@ void Application::run() {
         (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
         (unsigned long)uxTaskGetStackHighWaterMark(nullptr));
     }
-    valve_.tick(now);
-    if (!valve_.output()) mesh_.retire(store_.state().master,valve_.status().key,Op::Progress);
-    session_.poll(store_.state().master,(mesh_.address()-2)%5,now,[&](const Packet &p) { return mesh_.send(p); });
-    // Preserve a terminal snapshot before PREPARE can replace the completed job.
-    hallDiagnostics(nowMs());
-    MeshSubmission sent; while (mesh_.takeSubmission(sent)) {}
+    // Latch transport/queue faults before a new physical press can energise.
     if (!mesh_.healthy() && !valve_.transportFault()) {
       ackedKey_ = {}; ackedRevision_ = UINT32_MAX;
       eventAttempts_ = 0; eventAt_ = now - 1000; helloAt_ = now - 10000;
     }
     if (!mesh_.healthy() || mesh_.takeOverflow() || gateway_.overflow()) valve_.emergency(Reason::Transport, now);
+    modeTick(now);
+    holdButton(now);
+    valve_.tick(now);
+    if (!valve_.output()) mesh_.retire(store_.state().master,valve_.status().key,Op::Progress);
+    session_.poll(store_.state().master,(mesh_.address()-2)%5,now,[&](const Packet &p) { return mesh_.send(p); });
+    // Preserve a terminal snapshot before PREPARE can replace the completed job.
+    commitResult();
+    hallDiagnostics(nowMs());
+    MeshSubmission sent; while (mesh_.takeSubmission(sent)) {}
     Packet packetIn;
     for (unsigned count = 0; count < 4 && mesh_.receive(packetIn); ++count) incoming(packetIn, now);
     CommandLine commandLine;
     if (gateway_.receive(commandLine)) command(commandLine, now);
     if (previousOutput != valve_.output()) {
       previousOutput=valve_.output(); ESP_LOGI("output","t=%lu command=%u",(unsigned long)now,previousOutput);
+      buttonState();
     }
     hallDiagnostics(nowMs());
     periodic(now);

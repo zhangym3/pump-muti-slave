@@ -120,7 +120,7 @@ class MeshTxGovernor {
       auto &v = pending_[i]; if (!v.used) continue;
       if (elapsed(now, v.queuedAt, ttl(v.p))) {
         v.used = false; ++metrics_.expired;
-        if (!frozen_ && (authorizes(v.p) || v.p.op == Op::LeaseAck)) {
+        if (!frozen_ && (authorizes(v.p) || v.p.op==Op::MaintenanceGrant || v.p.op == Op::LeaseAck)) {
           fault(FaultReason::QueueExpired,v.p,now,0,0,v.queuedAt); return false;
         }
         continue;
@@ -236,6 +236,8 @@ class MeshTxGovernor {
   // authorization reply after a transport fault. No queued business replay.
   static bool diagnostic(const Packet &p) {
     switch (p.op) {
+      case Op::ModeGet: case Op::MaintenanceRetire: return controlFormat(p);
+      case Op::NodeState: return controlFormat(p) && !(p.bytes[12] & 3);
       case Op::Hello: return p.size == 13;
       case Op::HelloReply: return p.size == 6;
       case Op::CapabilitiesGet: return p.size == 4;
@@ -258,19 +260,19 @@ class MeshTxGovernor {
   }
   static bool authorizes(const Packet &p) { return p.op == Op::Prepare || p.op == Op::Start || p.op == Op::Lease; }
   static bool critical(const Packet &p) {
-      return authorizes(p) || p.op == Op::Close || p.op == Op::LeaseAck ||
+      return authorizes(p) || p.op==Op::ModeGet || p.op==Op::MaintenanceGrant || p.op==Op::MaintenanceRetire || p.op==Op::NodeState || p.op == Op::Close || p.op == Op::LeaseAck ||
       p.op == Op::Result || p.op == Op::ResultAck || p.op == Op::CommandAck ||
       p.op == Op::TargetClosed || p.op == Op::TargetClosedAck || p.op == Op::PrepareOK || p.op == Op::StartOK;
   }
   static unsigned priority(const Packet &p) {
-    if (p.op == Op::Close || p.op == Op::TargetClosed || p.op == Op::TargetClosedAck) return 0;
+    if (p.op==Op::MaintenanceRetire || p.op == Op::Close || p.op == Op::TargetClosed || p.op == Op::TargetClosedAck) return 0;
     if (p.op == Op::Lease || p.op == Op::LeaseAck) return 1;
-    if (p.op == Op::Result || p.op == Op::ResultAck) return 1;
+    if (p.op == Op::Result || p.op == Op::ResultAck || p.op==Op::ModeGet || p.op==Op::NodeState) return 1;
     if (p.op == Op::CommandAck || p.op == Op::PrepareOK || p.op == Op::StartOK) return 2;
     if (p.op == Op::Prepare || p.op == Op::Start) return 3;
     return 4;
   }
-  static uint32_t ttl(const Packet &p) { return critical(p) ? CriticalQueueTtlMs : p.op == Op::Progress ? 5000 : 2000; }
+  static uint32_t ttl(const Packet &p) { return p.op==Op::MaintenanceGrant ? 1000 : critical(p) ? CriticalQueueTtlMs : p.op == Op::Progress ? 5000 : 2000; }
   static bool sameIntent(const Packet &a, const Packet &b) {
     if (a.peer != b.peer || a.op != b.op) return false;
     if (a.op == Op::Hello || a.op == Op::HelloReply) return true;

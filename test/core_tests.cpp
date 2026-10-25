@@ -1,6 +1,9 @@
 #include "flow_job_controller.h"
 #include "valve_mesh_session.h"
 #include "control_request.h"
+#include "hold_button.h"
+#include "result_commit.h"
+#include "maintenance_session.h"
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
@@ -16,6 +19,47 @@ struct FakeValve : ValveIO {
 };
 ValveConfig config() { ValveConfig c; c.commissioned = true; c.k = 1000; return c; }
 Dose dose(JobKey key = {1, 1}) { return {key, 100, 100, 1000, 1, 10000}; }
+void unsaved_result_blocks_next_fence() {
+  FakeValve io; FlowJobController valve(io,config()); valve.boot({});
+  CHECK(valve.prepare(dose(),0)==Reply::Ok);
+  CHECK(valve.start(dose().key,1)==Reply::Ok);
+  io.reading={100,20}; valve.tick(20); valve.tick(520);
+  const auto result=valve.status(); CHECK(terminalResult(result));
+  ResultCommit commit;
+  CHECK(!commit.commit(result,[](const ValveStatus &) { return false; }));
+  closePreservingResult(valve,{1,2},Reason::Manual,521,commit.healthy());
+  CHECK(sameResult(valve.status(),result) && io.writes==1 && !io.on);
+  ValveMeshSession session(valve); std::vector<Packet> replies;
+  auto prepare=packet(Op::Prepare,1); Writer w{prepare}; auto d=dose({1,3});
+  w.key(d.key); w.u32(d.ml); w.u32(d.pulses); w.u32(d.k); w.u32(d.version); w.u32(d.maxMs);
+  w.u16(d.speedFactorPermille); w.u32(d.leaseMs); w.u8(0); w.u32(d.leaseFloor);
+  CHECK(session.handle(prepare,522,true,commit.healthy(),[&](const Packet &p) { replies.push_back(p); return true; },[](uint16_t,JobKey,Op) {}));
+  CHECK(replies.size()==1 && replies[0].op==Op::CommandAck);
+  Reader r{replies[0]}; r.key(); r.u8(); CHECK(Reply(r.u8())==Reply::Storage);
+  CHECK(sameResult(valve.status(),result) && io.writes==1 && !io.on);
+  // A successful commit allows a subsequent cancellation fence; late START remains stale.
+  ResultCommit saved; CHECK(saved.commit(result,[](const ValveStatus &) { return true; }));
+  closePreservingResult(valve,{1,2},Reason::Manual,523,saved.healthy());
+  CHECK(io.writes==2 && saved.contains(result));
+  CHECK(valve.start(result.key,524)==Reply::Stale && !io.on);
+  std::puts("PASS unsaved terminal measurement survives newer CLOSE and PREPARE; saved cancellation fence rejects late START");
+}
+void maintenance_expiry_with_held_button() {
+  FakeValve io; FlowJobController valve(io,config()); valve.boot({});
+  MaintenanceSession permit(16); HoldButton button;
+  button.update(false,0); button.update(false,30);
+  CHECK(permit.retire({1,1}) && permit.grant({1,2},16,1000,100));
+  CHECK(button.update(true,101)==HoldButton::Event::None);
+  CHECK(button.update(true,131)==HoldButton::Event::Press);
+  CHECK(permit.allowed(131) && valve.startLocalHold(131)==Reply::Ok && io.on);
+  CHECK(!permit.allowed(1100)); valve.stopLocalHold(Reason::Manual,1100);
+  CHECK(!io.on && !permit.grant({1,2},16,60000,1101));
+  valve.tick(1600); CHECK(!valve.busy());
+  CHECK(button.update(true,1601)==HoldButton::Event::None && io.opens==1);
+  permit.boot(32); CHECK(!permit.grant({1,3},16,1000,1602));
+  CHECK(!io.on && io.opens==1);
+  std::puts("PASS maintenance expiry closes held valve; held button and old boot grant cannot reopen it");
+}
 void target_and_tail() {
   FakeValve io; FlowJobController controller(io, config()); controller.boot({});
   io.reading.pulses = 900;
@@ -186,4 +230,135 @@ void prepared_deadline_and_floor() {
   }
   std::puts("PASS prepared 19999/20000ms boundary, non-sliding duplicate and lease floor validation");
 }
-int main() { job_calibration(); manual_flow_calibration_marks_and_settles(); prepared_deadline_and_floor(); target_and_tail(); validation_and_calibration(); commission_gate(); leases_and_interlock(); wire_contract_vectors(); transport_lock(); std::puts("PASS transport fault locks idle/prepared/open/terminal control until controlled restart"); std::puts("slave flow tests passed"); }
+void hold_button_edges() {
+  using E = HoldButton::Event;
+  HoldButton button;
+  CHECK(button.update(true, 0) == E::None);
+  CHECK(button.update(true, 1000) == E::None); // Held at boot cannot open.
+  CHECK(button.update(false, 1001) == E::None);
+  CHECK(button.update(true, 1020) == E::None); // Release bounce cannot arm.
+  CHECK(button.update(true, 1100) == E::None);
+  CHECK(button.update(false, 1101) == E::None);
+  CHECK(button.update(false, 1131) == E::None);
+  CHECK(button.update(true, 1140) == E::None);
+  CHECK(button.update(false, 1150) == E::None);
+  CHECK(button.update(false, 1180) == E::None);
+  CHECK(button.update(true, 1190) == E::None);
+  CHECK(button.update(true, 1219) == E::None);
+  CHECK(button.update(true, 1220) == E::Press);
+  CHECK(button.update(true, 100000) == E::None); // A held key never retriggers.
+  CHECK(button.update(false, 100001) == E::Release); // No release debounce delay.
+  CHECK(button.update(true, 100002) == E::None);
+  CHECK(button.update(true, 100100) == E::None); // Cannot reopen on release bounce.
+  CHECK(button.update(false, 100101) == E::None);
+  CHECK(button.update(false, 100131) == E::None);
+  CHECK(button.update(true, 100140) == E::None);
+  CHECK(button.update(true, 100170) == E::Press);
+
+  HoldButton wrap;
+  CHECK(wrap.update(false, UINT32_MAX - 20) == E::None);
+  CHECK(wrap.update(false, 10) == E::None);
+  CHECK(wrap.update(true, 11) == E::None);
+  CHECK(wrap.update(true, 41) == E::Press);
+  CHECK(wrap.update(false, 42) == E::Release);
+}
+void local_hold_arbitration_and_history() {
+  FakeValve io; FlowJobController c(io, config()); c.boot({});
+  CHECK(c.prepare(dose(), 0) == Reply::Ok);
+  CHECK(c.startLocalHold(1) == Reply::Busy && !io.on);
+  CHECK(c.start({1,1}, 2) == Reply::Ok);
+  c.stopLocalHold(Reason::Manual, 3); // Releasing a refused press cannot stop a remote job.
+  CHECK(io.on && c.status().valveCommand);
+  CHECK(c.startLocalHold(4) == Reply::Busy);
+  io.reading.pulses = 100; c.tick(10);
+  CHECK(c.startLocalHold(11) == Reply::Busy);
+  c.tick(510);
+  const auto result = c.status(); const auto writes = io.writes;
+  CHECK(result.phase == Phase::Done);
+  CHECK(c.startLocalHold(511) == Reply::Ok && io.on && c.output() && c.busy());
+  CHECK(c.prepare(dose(), 512) == Reply::Busy); // Even duplicate old requests cannot interfere.
+  CHECK(c.prepare(dose({1,2}), 512) == Reply::Busy);
+  CHECK(c.start({1,1}, 512) == Reply::Busy);
+  CHECK(c.canCommission() == Reply::Busy && c.configure(2000,2) == Reply::Busy);
+  io.reading.pulses += 123; c.tick(520);
+  CHECK(io.on && c.localHoldPulses() == 123); // No remote dose target applies to local hold.
+  c.stopLocalHold(Reason::Manual, 530);
+  CHECK(!io.on && !c.output() && c.localHoldBusy());
+  CHECK(c.prepare(dose({1,2}), 531) == Reply::Busy);
+  io.reading.pulses += 2; c.tick(540); c.tick(1040);
+  CHECK(!c.busy() && c.localHoldPulses() == 125 && c.localHoldReason() == Reason::Manual);
+  const auto after = c.status();
+  CHECK(after.key == result.key && after.phase == result.phase && after.revision == result.revision);
+  CHECK(after.pulses == result.pulses && after.reason == result.reason && after.quiet == result.quiet);
+  CHECK(io.writes == writes && c.prepare(dose({1,2}), 1041) == Reply::Ok);
+}
+void local_hold_gates_and_faults() {
+  FakeValve io; auto cfg = config(); cfg.commissioned = false;
+  FlowJobController disabled(io,cfg); disabled.boot({});
+  CHECK(disabled.startLocalHold(0) == Reply::NotReady && !io.on);
+  FlowJobController c(io,config()); c.boot({});
+  io.healthy = false; CHECK(c.startLocalHold(0) == Reply::NotReady);
+  io.healthy = true; CHECK(c.startLocalHold(1) == Reply::Ok);
+  c.tick(5000); CHECK(io.on); c.tick(5001);
+  CHECK(!io.on && c.localHoldReason() == Reason::NoFlow);
+  c.tick(5501); CHECK(!c.busy());
+  CHECK(c.startLocalHold(6000) == Reply::Ok);
+  io.reading.pulses = 1; c.tick(6010); c.tick(7509); CHECK(io.on);
+  c.tick(7510); CHECK(!io.on && c.localHoldReason() == Reason::NoFlow);
+  c.tick(8010); CHECK(c.startLocalHold(8011) == Reply::Ok);
+  io.healthy = false; c.tick(8012);
+  CHECK(!io.on && c.localHoldReason() == Reason::LocalInterlock);
+  io.healthy = true; c.tick(8512);
+  CHECK(c.startLocalHold(8513) == Reply::Ok);
+  c.emergency(Reason::Transport,8514);
+  CHECK(!io.on && c.transportFault() && c.localHoldReason() == Reason::Transport);
+  c.tick(9014); CHECK(c.startLocalHold(9015) == Reply::NotReady);
+
+  FakeValve brokenStorage; brokenStorage.storage = false;
+  FlowJobController broken(brokenStorage,config()); broken.boot({});
+  CHECK(broken.prepare(dose(),0) == Reply::Storage);
+  CHECK(broken.startLocalHold(1) == Reply::Storage && !brokenStorage.on);
+}
+void local_hold_runtime_stop_and_rearm() {
+  using E = HoldButton::Event;
+  for (bool globalLimit : {false,true}) {
+    FakeValve io; auto cfg = config();
+    cfg.localHoldMaxMs = globalLimit ? 1000 : 100;
+    cfg.maxRunMs = globalLimit ? 100 : 1000;
+    FlowJobController c(io,cfg); c.boot({});
+    HoldButton button;
+    CHECK(button.update(false,0) == E::None);
+    CHECK(button.update(false,30) == E::None);
+    CHECK(button.update(true,31) == E::None);
+    CHECK(button.update(true,61) == E::Press);
+    CHECK(c.startLocalHold(61) == Reply::Ok);
+    c.tick(160); CHECK(io.on); c.tick(161);
+    CHECK(!io.on && c.localHoldReason() == Reason::Runtime);
+    c.tick(661); CHECK(!c.busy());
+    CHECK(button.update(true,662) == E::None && io.opens == 1);
+    CHECK(button.update(false,663) == E::Release);
+    c.stopLocalHold(Reason::Manual,663);
+    CHECK(c.localHoldReason() == Reason::Runtime);
+    CHECK(button.update(false,693) == E::None);
+    CHECK(button.update(true,694) == E::None);
+    CHECK(button.update(true,724) == E::Press);
+    CHECK(c.startLocalHold(724) == Reply::Ok);
+    c.close({1,100},Reason::PumpFault,725);
+    CHECK(!io.on && c.localHoldReason() == Reason::PumpFault);
+  }
+  FakeValve io; FlowJobController c(io,config()); c.boot({});
+  CHECK(c.startLocalHold(UINT32_MAX-10) == Reply::Ok);
+  c.stopLocalHold(Reason::Manual,5); CHECK(!io.on);
+  io.reading.pulses = 1; c.tick(100);
+  io.reading.pulses = 2; c.tick(500);
+  io.reading.pulses = 3; c.tick(900);
+  io.reading.pulses = 4; c.tick(1300);
+  io.reading.pulses = 5; c.tick(1700);
+  io.reading.pulses = 6; c.tick(2100);
+  io.reading.pulses = 7; c.tick(2500);
+  io.reading.pulses = 8; c.tick(2900); c.tick(3005);
+  CHECK(!c.busy() && c.localHoldReason() == Reason::TailFlow);
+  CHECK(c.startLocalHold(3006) == Reply::Ok);
+  c.boot({}); CHECK(!io.on && !c.busy() && !c.output());
+}
+int main() { unsaved_result_blocks_next_fence(); maintenance_expiry_with_held_button(); hold_button_edges(); local_hold_arbitration_and_history(); local_hold_gates_and_faults(); local_hold_runtime_stop_and_rearm(); std::puts("PASS hold button debounce/boot lock/rearm, local arbitration/history and shutdown protections"); job_calibration(); manual_flow_calibration_marks_and_settles(); prepared_deadline_and_floor(); target_and_tail(); validation_and_calibration(); commission_gate(); leases_and_interlock(); wire_contract_vectors(); transport_lock(); std::puts("PASS transport fault locks idle/prepared/open/terminal control until controlled restart"); std::puts("slave flow tests passed"); }

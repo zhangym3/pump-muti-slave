@@ -46,6 +46,10 @@ esp_ble_mesh_model_op_t operations[] = {
   {ESP_BLE_MESH_MODEL_OP_3(0xD5, CompanyId), 8, 0},
   {ESP_BLE_MESH_MODEL_OP_3(0xD6, CompanyId), 16, 0},
   {ESP_BLE_MESH_MODEL_OP_3(0xD7, CompanyId), 8, 0},
+  {ESP_BLE_MESH_MODEL_OP_3(0xD9, CompanyId), 8, 0},
+  {ESP_BLE_MESH_MODEL_OP_3(0xDA, CompanyId), 14, 0},
+  {ESP_BLE_MESH_MODEL_OP_3(0xDB, CompanyId), 16, 0},
+  {ESP_BLE_MESH_MODEL_OP_3(0xDC, CompanyId), 12, 0},
   ESP_BLE_MESH_MODEL_OP_END
 };
 esp_ble_mesh_model_t sigModels[] = { ESP_BLE_MESH_MODEL_CFG_SRV(&config) };
@@ -74,6 +78,10 @@ void provisionCb(esp_ble_mesh_prov_cb_event_t event, esp_ble_mesh_prov_cb_param_
     ESP_LOGW("mesh", "PB-ADV provisioning link closed: bearer=0x%x reason=0x%02x",
       unsigned(p->node_prov_link_close.bearer), unsigned(p->node_prov_link_close.reason));
   } else if (event == ESP_BLE_MESH_NODE_PROV_COMPLETE_EVT) {
+#if defined(PUMP_PAIRING_TRACE)
+    // Network/configuration DEBUG logs include Mesh credentials.
+    esp_log_level_set("BLE_MESH", ESP_LOG_INFO);
+#endif
     ESP_LOGI("mesh", "slave provisioned addr=0x%04x net_idx=%u flags=0x%02x iv=%lu",
       p->node_prov_complete.addr, p->node_prov_complete.net_idx,
       unsigned(p->node_prov_complete.flags), (unsigned long)p->node_prov_complete.iv_index);
@@ -85,20 +93,24 @@ void modelCb(esp_ble_mesh_model_cb_event_t event, esp_ble_mesh_model_cb_param_t 
   if (!m.ctx || m.ctx->net_idx != 0 || m.ctx->app_idx != 0 ||
       m.length > sizeof(Packet::bytes) || (m.opcode & 0xFFFF) != CompanyId) return;
   const uint8_t code = uint8_t(m.opcode >> 16);
-  if (code < uint8_t(Op::Prepare) || code > uint8_t(Op::MeasureMark)) return;
+  if (code < uint8_t(Op::Prepare) || code > uint8_t(Op::MaintenanceRetire)) return;
   auto in = packet(Op(code), m.ctx->addr);
   in.size = uint8_t(m.length);
   memcpy(in.bytes, m.msg, in.size);
   instance->incoming(in);
 }
 bool urgent(const Packet &p) {
-  return p.op == Op::TargetClosed || p.op == Op::TargetClosedAck || p.op == Op::PrepareOK || p.op == Op::StartOK || p.op == Op::Close || p.op == Op::Lease || p.op == Op::LeaseAck || p.op == Op::MeasureMark ||
+  return p.op == Op::NodeState || p.op == Op::ModeGet || p.op == Op::MaintenanceRetire || p.op == Op::TargetClosed || p.op == Op::TargetClosedAck || p.op == Op::PrepareOK || p.op == Op::StartOK || p.op == Op::Close || p.op == Op::Lease || p.op == Op::LeaseAck || p.op == Op::MeasureMark ||
     p.op == Op::ResultQuery || p.op == Op::ResultAck || p.op == Op::Result ||
     p.op == Op::CommandAck;
 }
 }
 
 bool MeshTransport::init(uint16_t masterAddress) {
+#if defined(PUMP_PAIRING_TRACE)
+  static_assert(CONFIG_BLE_MESH_STACK_TRACE_LEVEL >= 4, "Pairing trace requires SDK debug logs");
+  esp_log_level_set("BLE_MESH", ESP_LOG_DEBUG);
+#endif
   instance = this;
   master_ = masterAddress;
   rx_ = xQueueCreate(48, sizeof(Packet));
@@ -200,7 +212,17 @@ bool MeshTransport::receive(Packet &p) {
 }
 void MeshTransport::worker() {
   uint32_t memoryAt=uint32_t(esp_timer_get_time()/1000);
+#if defined(PUMP_PAIRING_TRACE)
+  const uint32_t traceStartedAt = memoryAt;
+  bool traceActive = true;
+#endif
   for (;;) {
+#if defined(PUMP_PAIRING_TRACE)
+    if (traceActive && elapsed(uint32_t(esp_timer_get_time()/1000), traceStartedAt, 120000)) {
+      esp_log_level_set("BLE_MESH", ESP_LOG_INFO);
+      traceActive = false;
+    }
+#endif
     MeshTxGovernor::Dispatch d;
     bool dispatch = false;
     if (ready()) {

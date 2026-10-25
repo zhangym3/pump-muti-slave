@@ -14,6 +14,7 @@ class Hardware final : public ValveIO {
   bool init();
   FlowReading flow() override;
   int flowLevel() const;
+  bool holdButtonPressed() const;
   bool interlock() override;
   bool saveFence(JobKey k) override { return store_.fence(k); }
   void valve(bool on) override;

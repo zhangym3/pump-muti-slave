@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import shutil
 
-PATCH_VERSION = "pump-sar-2"
+PATCH_VERSION = "pump-sar-4"
 
 
 def sha(data):
