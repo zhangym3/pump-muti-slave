@@ -3,6 +3,7 @@
 #include "driver/usb_serial_jtag_vfs.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "recovery_credentials.h"
 #include <cstdio>
 #include <cstring>
 
@@ -35,8 +36,10 @@ bool ControlGateway::submit(const char *text, size_t length, bool bluetooth) {
   const bool stop = !strcmp(cmd.text, "estop") || !strncmp(cmd.text, "stop ", 5);
   if ((stop ? xQueueSendToFront(commands_, &cmd, 0) : xQueueSend(commands_, &cmd, 0)) != pdTRUE) {
     if (stop) overflow_ = true;
+    recovery::wipe(cmd.text,sizeof(cmd.text));
     return false;
   }
+  recovery::wipe(cmd.text,sizeof(cmd.text));
   return true;
 }
 bool ControlGateway::receive(CommandLine &cmd) { return xQueueReceive(commands_, &cmd, 0) == pdTRUE; }
@@ -56,10 +59,11 @@ void ControlGateway::ioWorker() {
       const char c = char(bytes[i]);
       if (c == '\r' || c == '\n') {
         if (used && !discarding) submit(input, used, false);
+        recovery::wipe(input,sizeof(input));
         used = 0;
         discarding = false;
       } else if (used < sizeof(input) - 1 && !discarding) input[used++] = c;
-      else { discarding = true; used = 0; }
+      else { discarding = true; recovery::wipe(input,sizeof(input)); used = 0; }
     }
     char out[192];
     if (xQueueReceive(output_, out, 0) == pdTRUE) {

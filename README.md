@@ -4,9 +4,9 @@
 
 2026-10-22：新增 USB 维护命令 `mesh-local-reset CONFIRM`，用于主机删除未收到从机退网确认、从机仍保存旧 Mesh 凭据而无法再次被扫描的恢复场景。仅在阀门空闲、存储健康、节点已配网时接受；成功后立即关阀，清除 Mesh 凭据和启用状态并重启进入 PB-ADV。任务记录、K 系数和主机地址保留；更换主机后需用 `master ADDR` 更新主机单播地址。普通复位/长按 Reset 不清 Mesh。该命令需先刷入包含本功能的固件，尚未实机验证。
 
-当前目录 `D:/pump/pump-muti-slave` 只构建 ESP32-C3 阀门从节点，环境为 `valve_slave_c3`。PlatformIO 使用官方 `esp32-c3-devkitm-1` 的通用 C3 定义，按 Super Mini / 4MB Flash / DIO 40MHz 配置，ESP-IDF 5.4 / espressif32@6.10.0。
+当前目录 `D:/pump-muti/pump-muti-slave` 只构建 ESP32-C3 阀门从节点，唯一构建环境为 `valve_slave_c3`，独立配网诊断环境已移除。PlatformIO 使用官方 `esp32-c3-devkitm-1` 的通用 C3 定义，按 Super Mini / 4MB Flash / DIO 40MHz 配置，ESP-IDF 5.4 / espressif32@6.10.0。
 
-主节点独立工程：`D:/pump/pump-muti`（ESP32-C3 Super Mini，pump_master，PWM GPIO4）。本工程拥有独立源码、sdkconfig、编译缓存和打包脚本，不使用跨目录源码链接。
+主节点独立工程：`D:/pump-muti/pump-muti`（ESP32-S3 N16R8，pump_master，PWM GPIO4）。本工程拥有独立源码、sdkconfig、编译缓存和打包脚本，不使用跨目录源码链接。
 
 2026-10-21：配套 APP 1.2.2 可在设备页单台删除从机。此版从机收到 Mesh Node Reset 后，在应用任务中关阀、保存 `commissioned=false` 并重启恢复 PB-ADV 待组网；不在蓝牙回调中写 NVS 或阻塞。保存失败时持续关阀并重试，不处理旧业务队列。重加后需重新启用配置，K 系数和任务持久数据保留。本次已构建及通过 host tests，未刷写或实机验证。离线删除只能确认主机本地移除，普通复位/长按 Reset 不清 Mesh。
 
@@ -39,7 +39,7 @@ GPIO3 与 GND 接四脚轻触开关的两组常开触点，先用万用表确认
 ## 构建与打包
 
 ```powershell
-Set-Location D:/pump/pump-muti-slave
+Set-Location D:/pump-muti/pump-muti-slave
 pio run -e valve_slave_c3
 python tools/package_firmware.py
 ```

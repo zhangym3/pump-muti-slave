@@ -1,13 +1,14 @@
 #pragma once
 #include "protocol.h"
 #include "mesh_tx_governor.h"
+#include "recovery_credentials.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include <atomic>
 namespace pump {
 class MeshTransport final {
  public:
-  bool init(uint16_t master);
+  bool init(uint16_t master,const recovery::Credential *credential=nullptr);
   bool send(const Packet &p);
   bool receive(Packet &p);
   bool ready() const;

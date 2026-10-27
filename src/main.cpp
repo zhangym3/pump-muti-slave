@@ -14,7 +14,7 @@ extern "C" void app_main() {
   if (storage.state().resultValid) valve.restore(storage.state().result);
   static MeshTransport mesh;
   static ControlGateway gateway;
-  if (!mesh.init(storage.state().master) || !gateway.init(storage.state().gatewayPin, mesh.deviceName())) { hardware.safeOff(); ESP_LOGE("boot", "slave Mesh/gateway initialization failed: valve OFF"); return; }
+  if (!mesh.init(storage.state().master,storage.recoveryCredentials().get()) || !gateway.init(storage.state().gatewayPin, mesh.deviceName())) { hardware.safeOff(); ESP_LOGE("boot", "slave Mesh/gateway initialization failed: valve OFF"); return; }
   ESP_LOGI("boot", "Mesh identity: %s; phone connects to the master", mesh.deviceName());
   static Application application(storage, hardware, mesh, gateway, valve);
   constexpr BaseType_t controlCore = portNUM_PROCESSORS > 1 ? 1 : 0;

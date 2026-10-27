@@ -1,7 +1,9 @@
 #include "application.h"
 #include "mesh_tx_diagnostics.h"
+#include "recovery_diagnostics.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_random.h"
 #include "esp_heap_caps.h"
 #include "esp_task_wdt.h"
 #include "freertos/task.h"
@@ -286,6 +288,83 @@ void Application::command(CommandLine &line, uint32_t now) {
   if (!strcmp(op, "local") && count == 1) { localState(nowMs()); return; }
   if (!strcmp(op, "hall") && count == 1) { hallState(nowMs(), "query"); return; }
   if (!strcmp(op, "mesh-diag") && count == 1) { meshState(); return; }
+  if (!strcmp(op, "recovery-resources") && count == 1) {
+    if (line.bluetooth) { gateway_.publish("UNAUTHORIZED diagnostics_requires_USB"); return; }
+    recovery::publishRecoveryResources([&](const char *text) { gateway_.publish(text); });
+    return;
+  }
+  if (!strcmp(op, "recovery-status") && count == 1) {
+    const auto *credential=store_.recoveryCredentials().get();
+    char uuid[33]{};
+    const auto &device=store_.recoveryCredentials().device();
+    for (size_t i=0;i<device.size();++i) snprintf(uuid+2*i,3,"%02X",device[i]);
+    char out[176];
+    snprintf(out,sizeof(out),"RECOVERY_CREDENTIAL schema=1 uuid=%s initialized=%u epoch=%lu recovery_enabled=0",
+      uuid,credential!=nullptr,static_cast<unsigned long>(credential ? credential->epoch : 0));
+    gateway_.publish(out); return;
+  }
+  if (!strcmp(op, "recovery-check")) {
+    // A fresh challenge verifies a completed/uncertain USB initialization without
+    // exporting a key. Shares the BLE transcript; never enables Mesh recovery.
+    const auto *credential=store_.recoveryCredentials().get();
+    if (line.bluetooth || !credential || count!=2 || strlen(tokens[1])!=64) {
+      gateway_.publish("INVALID recovery_check"); return;
+    }
+    recovery::Challenge challenge; challenge.device=credential->device; challenge.credentialEpoch=credential->epoch;
+    for (size_t i=0;i<32;++i) {
+      const auto digit=[](char c)->int {
+        if (c>='0' && c<='9') return c-'0';
+        if (c>='a' && c<='f') return c-'a'+10;
+        if (c>='A' && c<='F') return c-'A'+10;
+        return -1;
+      };
+      const int hi=digit(tokens[1][2*i]),lo=digit(tokens[1][2*i+1]);
+      if (hi<0 || lo<0) { gateway_.publish("INVALID recovery_check"); return; }
+      challenge.clientNonce[i]=uint8_t(hi*16+lo);
+    }
+    esp_fill_random(challenge.deviceNonce.data(),challenge.deviceNonce.size());
+    recovery::Proof proof{};
+    if (!recovery::makeProof(credential->key,challenge,true,proof)) { gateway_.publish("FAILED recovery_check"); return; }
+    char nonce[65]{},auth[65]{},out[192];
+    for(size_t i=0;i<32;++i) {
+      snprintf(nonce+2*i,3,"%02X",challenge.deviceNonce[i]);
+      snprintf(auth+2*i,3,"%02X",proof[i]);
+    }
+    snprintf(out,sizeof(out),"RECOVERY_CHECK epoch=%lu nonce=%s proof=%s",(unsigned long)credential->epoch,nonce,auth);
+    gateway_.publish(out); return;
+  }
+  if (!strcmp(op, "recovery-init")) {
+    // Trusted local installation only. No key generation/export through BLE.
+    if (line.bluetooth) { gateway_.publish("UNAUTHORIZED recovery_requires_USB"); return; }
+    if (count!=3 || strcmp(tokens[1],"CONFIRM") || strlen(tokens[2])!=64) {
+      gateway_.publish("INVALID recovery_init"); recovery::wipe(line.text,sizeof(line.text)); return;
+    }
+    recovery::Key key{}; bool valid=true;
+    auto hex=[](char c)->int {
+      if(c>='0'&&c<='9') return c-'0';
+      if(c>='a'&&c<='f') return c-'a'+10;
+      if(c>='A'&&c<='F') return c-'A'+10;
+      return -1;
+    };
+    for(size_t i=0;i<key.size();++i) {
+      const int high=hex(tokens[2][2*i]),low=hex(tokens[2][2*i+1]);
+      if(high<0 || low<0) valid=false; else key[i]=uint8_t(high*16+low);
+    }
+    recovery::wipe(line.text,sizeof(line.text));
+    if (!valid) { recovery::wipe(key.data(),key.size()); gateway_.publish("INVALID recovery_init"); return; }
+    const bool safe=storageHealthy_ && !valve_.busy() && !valve_.output() && !hw_.holdButtonPressed() &&
+      !maintenance_.allowed(now) && elapsed(now,flowQuietAt_,valve_.config().quietMs);
+    if (!safe) { recovery::wipe(key.data(),key.size()); gateway_.publish("BUSY recovery_init"); return; }
+    auto &credentials=store_.recoveryCredentials();
+    if(credentials.state()!=recovery::JournalState::Empty) {
+      recovery::wipe(key.data(),key.size()); gateway_.publish("CONFLICT recovery_already_initialized"); return;
+    }
+    const bool saved=credentials.initialize(key); recovery::wipe(key.data(),key.size());
+    if (!saved && credentials.state()==recovery::JournalState::Fault) {
+      storageHealthy_=false; valve_.emergency(Reason::Manual,now); hw_.safeOff();
+    }
+    gateway_.publish(saved ? "OK recovery_initialized epoch=1 recovery_enabled=0" : "FAILED recovery_init"); return;
+  }
   if (!strcmp(op, "mesh-local-reset")) {
     if (line.bluetooth) { gateway_.publish("UNSUPPORTED transport"); return; }
     if (count != 2 || strcmp(tokens[1], "CONFIRM")) {
@@ -330,7 +409,8 @@ void Application::command(CommandLine &line, uint32_t now) {
     if (!store_.write(next)) { storageHealthy_ = false; gateway_.publish("STORAGE"); return; }
     mesh_.master(next.master); masterEpoch_ = 0; gateway_.publish("OK master"); return;
   }
-  gateway_.publish("HELP hello | local | hall | mesh-diag | mesh-local-reset CONFIRM | estop | k PULSES_PER_1000_ML | master ADDR");
+  gateway_.publish("HELP hello | local | hall | mesh-diag | recovery-status | recovery-init CONFIRM KEY64 | recovery-check NONCE64");
+  gateway_.publish("HELP mesh-local-reset CONFIRM | estop | k PULSES_PER_1000_ML | master ADDR");
 }
 
 void Application::periodic(uint32_t now) {
@@ -442,7 +522,10 @@ void Application::run() {
     Packet packetIn;
     for (unsigned count = 0; count < 4 && mesh_.receive(packetIn); ++count) incoming(packetIn, now);
     CommandLine commandLine;
-    if (gateway_.receive(commandLine)) command(commandLine, now);
+    if (gateway_.receive(commandLine)) {
+      command(commandLine, now);
+      recovery::wipe(commandLine.text,sizeof(commandLine.text));
+    }
     if (previousOutput != valve_.output()) {
       previousOutput=valve_.output(); ESP_LOGI("output","t=%lu command=%u",(unsigned long)now,previousOutput);
       buttonState();

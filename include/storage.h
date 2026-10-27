@@ -3,6 +3,8 @@
 #include "flow_job_controller.h"
 #include "control_request.h"
 #include "nvs.h"
+#include "recovery_credentials.h"
+#include "recovery_nvs.h"
 namespace pump {
 // These types remain solely to decode and preserve the deployed format=1 blob.
 // They are not used as a scheduler on the C3 slave.
@@ -36,7 +38,11 @@ class Storage {
   bool setCommissioned(bool value);
   bool fence(JobKey key);
   bool result(const ValveStatus &s);
+  recovery::CredentialStore &recoveryCredentials() { return recoveryCredentials_; }
  private:
+  recovery::NvsBlobStore recoveryBackend_;
+  recovery::Journal recoveryJournal_{recoveryBackend_};
+  recovery::CredentialStore recoveryCredentials_{recoveryJournal_};
   nvs_handle_t handle_ = 0;
   PersistentState state_;
   bool commissioned_ = false;

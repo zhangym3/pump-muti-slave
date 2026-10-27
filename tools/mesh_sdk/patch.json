@@ -1,5 +1,5 @@
 {
-  "version": "pump-sar-4",
+  "version": "pump-recovery-oob-5",
   "inputs": {
     "package.json": "8038fceb30b894871e2d986d6c5ec0527035ba4cd534f3435f6a423bdafe1145",
     "version.txt": "742c2c22a2ebdb26fb9bf21f6f9df508587b7eccd9d59485a4f45935adafde23",
@@ -10,7 +10,8 @@
     "components/bt/esp_ble_mesh/api/core/include/esp_ble_mesh_networking_api.h": "4ad4b379d9b995741ab80ecbc2f79f54e49e338a007de50782bccbc3bad0cf44",
     "components/bt/esp_ble_mesh/btc/btc_ble_mesh_prov.c": "1c88c3b76722a67cb9c803f7bc94378fe160d6fd27846b5d9d14d87b500ad54f",
     "components/bt/esp_ble_mesh/btc/include/btc_ble_mesh_prov.h": "4e25be6d3d18ced9f3ab09e169cae36bb84efbfc877504c44db5068a2c0e76a2",
-    "components/bt/esp_ble_mesh/core/storage/settings.c": "6cab2de48daf767d071b6b30f4d551f6820111aae749a43d759dbcd9530e584c"
+    "components/bt/esp_ble_mesh/core/storage/settings.c": "6cab2de48daf767d071b6b30f4d551f6820111aae749a43d759dbcd9530e584c",
+    "components/bt/esp_ble_mesh/core/prov_node.c": "31188ab4db5fe49ba818c419394c88955cb7434811a1a8eb448353a14327e492"
   },
   "edits": {
     "esp_ble_mesh/api/core/esp_ble_mesh_networking_api.c": [
@@ -80,23 +81,91 @@
       }
     ],
     "esp_ble_mesh/core/transport.c": [
-      {"old":"#define BUF_TIMEOUT                 K_NO_WAIT\n\nstatic struct seg_tx {","new":"#define BUF_TIMEOUT                 K_NO_WAIT\n\n#if defined(PUMP_SAR_DIAGNOSTICS)\n#define SAR_DIAG_LOG(...) BT_WARN(__VA_ARGS__)\n#else\n#define SAR_DIAG_LOG(...) do { } while (0)\n#endif\n\nstatic struct seg_tx {","count":1},
-      {"old":"    uint64_t               seq_auth;\n    uint16_t               dst;","new":"    uint64_t               seq_auth;\n    uint16_t               src;\n    uint16_t               dst;","count":1},
-      {"old":"} seg_tx[CONFIG_BLE_MESH_TX_SEG_MSG_COUNT];","new":"} seg_tx[CONFIG_BLE_MESH_TX_SEG_MSG_COUNT];\n\n#if defined(PUMP_SAR_DIAGNOSTICS)\nstatic uint32_t seg_tx_unacked_mask(const struct seg_tx *tx)\n{\n    uint32_t mask = 0U;\n    for (int i = 0; i <= tx->seg_n; i++) {\n        if (tx->seg[i]) {\n            mask |= BIT(i);\n        }\n    }\n    return mask;\n}\n#endif","count":1},
-      {"old":"    const struct bt_mesh_send_cb *cb = tx->cb;\n    void *cb_data = tx->cb_data;\n\n    seg_tx_reset(tx);","new":"    const struct bt_mesh_send_cb *cb = tx->cb;\n    void *cb_data = tx->cb_data;\n\n    SAR_DIAG_LOG(\"SAR_TX_DONE src=0x%04x dst=0x%04x seq_auth=0x%llx seq_zero=0x%04x seg_n=%u result=%d unacked=0x%08x\",\n                 tx->src, tx->dst, (unsigned long long)tx->seq_auth,\n                 (uint16_t)(tx->seq_auth & TRANS_SEQ_ZERO_MASK), tx->seg_n, err, seg_tx_unacked_mask(tx));\n    seg_tx_reset(tx);","count":1},
-      {"old":"    tx->dst = net_tx->ctx->addr;\n    if (sdu->len) {","new":"    tx->src = net_tx->src;\n    tx->dst = net_tx->ctx->addr;\n    if (sdu->len) {","count":1},
-      {"old":"    seq_zero = tx->seq_auth & TRANS_SEQ_ZERO_MASK;\n\n    BT_DBG(\"SeqZero 0x%04x\", seq_zero);","new":"    seq_zero = tx->seq_auth & TRANS_SEQ_ZERO_MASK;\n\n    SAR_DIAG_LOG(\"SAR_TX_START src=0x%04x dst=0x%04x seq_auth=0x%llx seq_zero=0x%04x seg_n=%u ctl=%u\",\n                 tx->src, tx->dst, (unsigned long long)tx->seq_auth, seq_zero, tx->seg_n, !!ctl_op);\n    BT_DBG(\"SeqZero 0x%04x\", seq_zero);","count":1},
-      {"old":"    if (!(tx->attempts--)) {\n        BT_WARN(\"Ran out of retransmit attempts\");\n        bt_mesh_seg_tx_unlock();","new":"    if (!(tx->attempts--)) {\n        SAR_DIAG_LOG(\"SAR_TX_EXHAUST src=0x%04x dst=0x%04x seq_auth=0x%llx seq_zero=0x%04x seg_n=%u unacked=0x%08x\",\n                     tx->src, tx->dst, (unsigned long long)tx->seq_auth,\n                     (uint16_t)(tx->seq_auth & TRANS_SEQ_ZERO_MASK), tx->seg_n, seg_tx_unacked_mask(tx));\n        BT_WARN(\"Ran out of retransmit attempts\");\n        bt_mesh_seg_tx_unlock();","count":1},
-      {"old":"    BT_INFO(\"Attempts: %u\", tx->attempts);\n\n    for (i = 0; i <= tx->seg_n; i++) {","new":"    SAR_DIAG_LOG(\"SAR_TX_RETRY src=0x%04x dst=0x%04x seq_auth=0x%llx seq_zero=0x%04x seg_n=%u remaining=%u unacked=0x%08x\",\n                 tx->src, tx->dst, (unsigned long long)tx->seq_auth,\n                 (uint16_t)(tx->seq_auth & TRANS_SEQ_ZERO_MASK), tx->seg_n, tx->attempts, seg_tx_unacked_mask(tx));\n    BT_INFO(\"Attempts: %u\", tx->attempts);\n\n    for (i = 0; i <= tx->seg_n; i++) {","count":1},
-      {"old":"    tx = seg_tx_lookup(seq_zero, obo, rx->ctx.addr);\n    if (!tx) {\n        BT_INFO(\"No matching TX context for Seg Ack\");","new":"    tx = seg_tx_lookup(seq_zero, obo, rx->ctx.addr);\n    if (!tx) {\n        SAR_DIAG_LOG(\"SAR_ACK_UNMATCHED src=0x%04x dst=0x%04x seq_zero=0x%04x obo=%u block=0x%08x\",\n                     rx->ctx.addr, rx->ctx.recv_dst, seq_zero, obo, ack);\n        BT_INFO(\"No matching TX context for Seg Ack\");","count":1},
-      {"old":"    *seq_auth = tx->seq_auth;\n\n    if (!ack) {","new":"    *seq_auth = tx->seq_auth;\n    SAR_DIAG_LOG(\"SAR_ACK_RX src=0x%04x dst=0x%04x seq_auth=0x%llx seq_zero=0x%04x obo=%u block=0x%08x\",\n                 rx->ctx.addr, tx->src, (unsigned long long)tx->seq_auth, seq_zero, obo, ack);\n\n    if (!ack) {","count":1},
-      {"old":"    return bt_mesh_ctl_send(&tx, TRANS_CTL_OP_ACK, buf, sizeof(buf),\n                            NULL, NULL);","new":"    SAR_DIAG_LOG(\"SAR_ACK_TX src=0x%04x dst=0x%04x seq_auth=0x%llx seq_zero=0x%04x obo=%u block=0x%08x\",\n                 tx.src, tx.ctx->addr, (unsigned long long)*seq_auth, seq_zero, obo, block);\n    return bt_mesh_ctl_send(&tx, TRANS_CTL_OP_ACK, buf, sizeof(buf),\n                            NULL, NULL);","count":1},
-      {"old":"        BT_WARN(\"Incomplete timer expired\");\n        bt_mesh_seg_rx_unlock();","new":"        SAR_DIAG_LOG(\"SAR_RX_TIMEOUT src=0x%04x dst=0x%04x seq_auth=0x%llx seq_zero=0x%04x seg_n=%u block=0x%08x age_ms=%u\",\n                     rx->src, rx->dst, (unsigned long long)rx->seq_auth,\n                     (uint16_t)(rx->seq_auth & TRANS_SEQ_ZERO_MASK), rx->seg_n, rx->block,\n                     (uint32_t)(k_uptime_get_32() - rx->last));\n        BT_WARN(\"Incomplete timer expired\");\n        bt_mesh_seg_rx_unlock();","count":1},
-      {"old":"            BT_WARN(\"Duplicate SDU from src 0x%04x\", net_rx->ctx.addr);","new":"            SAR_DIAG_LOG(\"SAR_RX_REPLACED src=0x%04x dst=0x%04x seq_auth=0x%llx seq_zero=0x%04x seg_n=%u block=0x%08x\",\n                         rx->src, rx->dst, (unsigned long long)rx->seq_auth,\n                         (uint16_t)(rx->seq_auth & TRANS_SEQ_ZERO_MASK), rx->seg_n, rx->block);\n            BT_WARN(\"Duplicate SDU from src 0x%04x\", net_rx->ctx.addr);","count":1},
-      {"old":"    if (BIT(seg_o) & rx->block) {\n        BT_INFO(\"Received already received fragment\");","new":"    if (BIT(seg_o) & rx->block) {\n        SAR_DIAG_LOG(\"SAR_RX_DUP src=0x%04x dst=0x%04x seq_auth=0x%llx seg_o=%u seg_n=%u block=0x%08x\",\n                     rx->src, rx->dst, (unsigned long long)rx->seq_auth, seg_o, seg_n, rx->block);\n        BT_INFO(\"Received already received fragment\");","count":1},
-      {"old":"    rx->block |= BIT(seg_o);\n\n    if (rx->block != BLOCK_COMPLETE(seg_n)) {","new":"    rx->block |= BIT(seg_o);\n    SAR_DIAG_LOG(\"SAR_RX_SEG src=0x%04x dst=0x%04x seq_auth=0x%llx seq_zero=0x%04x seg_o=%u seg_n=%u block=0x%08x\",\n                 rx->src, rx->dst, (unsigned long long)rx->seq_auth,\n                 (uint16_t)(rx->seq_auth & TRANS_SEQ_ZERO_MASK), seg_o, seg_n, rx->block);\n\n    if (rx->block != BLOCK_COMPLETE(seg_n)) {","count":1},
-      {"old":"        rx->block = 0U;\n\n        BT_DBG(\"New RX context. Block Complete 0x%08x\",\n               BLOCK_COMPLETE(seg_n));","new":"        rx->block = 0U;\n        SAR_DIAG_LOG(\"SAR_RX_ALLOC src=0x%04x dst=0x%04x seq_auth=0x%llx seq_zero=0x%04x seg_n=%u ctl=%u\",\n                     rx->src, rx->dst, (unsigned long long)rx->seq_auth,\n                     (uint16_t)(rx->seq_auth & TRANS_SEQ_ZERO_MASK), rx->seg_n, rx->ctl);\n\n        BT_DBG(\"New RX context. Block Complete 0x%08x\",\n               BLOCK_COMPLETE(seg_n));","count":1},
-      {"old":"    BT_DBG(\"Complete SDU\");","new":"    SAR_DIAG_LOG(\"SAR_RX_COMPLETE src=0x%04x dst=0x%04x seq_auth=0x%llx seq_zero=0x%04x seg_n=%u block=0x%08x\",\n                 rx->src, rx->dst, (unsigned long long)rx->seq_auth,\n                 (uint16_t)(rx->seq_auth & TRANS_SEQ_ZERO_MASK), rx->seg_n, rx->block);\n    BT_DBG(\"Complete SDU\");","count":1}
+      {
+        "old": "#define BUF_TIMEOUT                 K_NO_WAIT\n\nstatic struct seg_tx {",
+        "new": "#define BUF_TIMEOUT                 K_NO_WAIT\n\n#if defined(PUMP_SAR_DIAGNOSTICS)\n#define SAR_DIAG_LOG(...) BT_WARN(__VA_ARGS__)\n#else\n#define SAR_DIAG_LOG(...) do { } while (0)\n#endif\n\nstatic struct seg_tx {",
+        "count": 1
+      },
+      {
+        "old": "    uint64_t               seq_auth;\n    uint16_t               dst;",
+        "new": "    uint64_t               seq_auth;\n    uint16_t               src;\n    uint16_t               dst;",
+        "count": 1
+      },
+      {
+        "old": "} seg_tx[CONFIG_BLE_MESH_TX_SEG_MSG_COUNT];",
+        "new": "} seg_tx[CONFIG_BLE_MESH_TX_SEG_MSG_COUNT];\n\n#if defined(PUMP_SAR_DIAGNOSTICS)\nstatic uint32_t seg_tx_unacked_mask(const struct seg_tx *tx)\n{\n    uint32_t mask = 0U;\n    for (int i = 0; i <= tx->seg_n; i++) {\n        if (tx->seg[i]) {\n            mask |= BIT(i);\n        }\n    }\n    return mask;\n}\n#endif",
+        "count": 1
+      },
+      {
+        "old": "    const struct bt_mesh_send_cb *cb = tx->cb;\n    void *cb_data = tx->cb_data;\n\n    seg_tx_reset(tx);",
+        "new": "    const struct bt_mesh_send_cb *cb = tx->cb;\n    void *cb_data = tx->cb_data;\n\n    SAR_DIAG_LOG(\"SAR_TX_DONE src=0x%04x dst=0x%04x seq_auth=0x%llx seq_zero=0x%04x seg_n=%u result=%d unacked=0x%08x\",\n                 tx->src, tx->dst, (unsigned long long)tx->seq_auth,\n                 (uint16_t)(tx->seq_auth & TRANS_SEQ_ZERO_MASK), tx->seg_n, err, seg_tx_unacked_mask(tx));\n    seg_tx_reset(tx);",
+        "count": 1
+      },
+      {
+        "old": "    tx->dst = net_tx->ctx->addr;\n    if (sdu->len) {",
+        "new": "    tx->src = net_tx->src;\n    tx->dst = net_tx->ctx->addr;\n    if (sdu->len) {",
+        "count": 1
+      },
+      {
+        "old": "    seq_zero = tx->seq_auth & TRANS_SEQ_ZERO_MASK;\n\n    BT_DBG(\"SeqZero 0x%04x\", seq_zero);",
+        "new": "    seq_zero = tx->seq_auth & TRANS_SEQ_ZERO_MASK;\n\n    SAR_DIAG_LOG(\"SAR_TX_START src=0x%04x dst=0x%04x seq_auth=0x%llx seq_zero=0x%04x seg_n=%u ctl=%u\",\n                 tx->src, tx->dst, (unsigned long long)tx->seq_auth, seq_zero, tx->seg_n, !!ctl_op);\n    BT_DBG(\"SeqZero 0x%04x\", seq_zero);",
+        "count": 1
+      },
+      {
+        "old": "    if (!(tx->attempts--)) {\n        BT_WARN(\"Ran out of retransmit attempts\");\n        bt_mesh_seg_tx_unlock();",
+        "new": "    if (!(tx->attempts--)) {\n        SAR_DIAG_LOG(\"SAR_TX_EXHAUST src=0x%04x dst=0x%04x seq_auth=0x%llx seq_zero=0x%04x seg_n=%u unacked=0x%08x\",\n                     tx->src, tx->dst, (unsigned long long)tx->seq_auth,\n                     (uint16_t)(tx->seq_auth & TRANS_SEQ_ZERO_MASK), tx->seg_n, seg_tx_unacked_mask(tx));\n        BT_WARN(\"Ran out of retransmit attempts\");\n        bt_mesh_seg_tx_unlock();",
+        "count": 1
+      },
+      {
+        "old": "    BT_INFO(\"Attempts: %u\", tx->attempts);\n\n    for (i = 0; i <= tx->seg_n; i++) {",
+        "new": "    SAR_DIAG_LOG(\"SAR_TX_RETRY src=0x%04x dst=0x%04x seq_auth=0x%llx seq_zero=0x%04x seg_n=%u remaining=%u unacked=0x%08x\",\n                 tx->src, tx->dst, (unsigned long long)tx->seq_auth,\n                 (uint16_t)(tx->seq_auth & TRANS_SEQ_ZERO_MASK), tx->seg_n, tx->attempts, seg_tx_unacked_mask(tx));\n    BT_INFO(\"Attempts: %u\", tx->attempts);\n\n    for (i = 0; i <= tx->seg_n; i++) {",
+        "count": 1
+      },
+      {
+        "old": "    tx = seg_tx_lookup(seq_zero, obo, rx->ctx.addr);\n    if (!tx) {\n        BT_INFO(\"No matching TX context for Seg Ack\");",
+        "new": "    tx = seg_tx_lookup(seq_zero, obo, rx->ctx.addr);\n    if (!tx) {\n        SAR_DIAG_LOG(\"SAR_ACK_UNMATCHED src=0x%04x dst=0x%04x seq_zero=0x%04x obo=%u block=0x%08x\",\n                     rx->ctx.addr, rx->ctx.recv_dst, seq_zero, obo, ack);\n        BT_INFO(\"No matching TX context for Seg Ack\");",
+        "count": 1
+      },
+      {
+        "old": "    *seq_auth = tx->seq_auth;\n\n    if (!ack) {",
+        "new": "    *seq_auth = tx->seq_auth;\n    SAR_DIAG_LOG(\"SAR_ACK_RX src=0x%04x dst=0x%04x seq_auth=0x%llx seq_zero=0x%04x obo=%u block=0x%08x\",\n                 rx->ctx.addr, tx->src, (unsigned long long)tx->seq_auth, seq_zero, obo, ack);\n\n    if (!ack) {",
+        "count": 1
+      },
+      {
+        "old": "    return bt_mesh_ctl_send(&tx, TRANS_CTL_OP_ACK, buf, sizeof(buf),\n                            NULL, NULL);",
+        "new": "    SAR_DIAG_LOG(\"SAR_ACK_TX src=0x%04x dst=0x%04x seq_auth=0x%llx seq_zero=0x%04x obo=%u block=0x%08x\",\n                 tx.src, tx.ctx->addr, (unsigned long long)*seq_auth, seq_zero, obo, block);\n    return bt_mesh_ctl_send(&tx, TRANS_CTL_OP_ACK, buf, sizeof(buf),\n                            NULL, NULL);",
+        "count": 1
+      },
+      {
+        "old": "        BT_WARN(\"Incomplete timer expired\");\n        bt_mesh_seg_rx_unlock();",
+        "new": "        SAR_DIAG_LOG(\"SAR_RX_TIMEOUT src=0x%04x dst=0x%04x seq_auth=0x%llx seq_zero=0x%04x seg_n=%u block=0x%08x age_ms=%u\",\n                     rx->src, rx->dst, (unsigned long long)rx->seq_auth,\n                     (uint16_t)(rx->seq_auth & TRANS_SEQ_ZERO_MASK), rx->seg_n, rx->block,\n                     (uint32_t)(k_uptime_get_32() - rx->last));\n        BT_WARN(\"Incomplete timer expired\");\n        bt_mesh_seg_rx_unlock();",
+        "count": 1
+      },
+      {
+        "old": "            BT_WARN(\"Duplicate SDU from src 0x%04x\", net_rx->ctx.addr);",
+        "new": "            SAR_DIAG_LOG(\"SAR_RX_REPLACED src=0x%04x dst=0x%04x seq_auth=0x%llx seq_zero=0x%04x seg_n=%u block=0x%08x\",\n                         rx->src, rx->dst, (unsigned long long)rx->seq_auth,\n                         (uint16_t)(rx->seq_auth & TRANS_SEQ_ZERO_MASK), rx->seg_n, rx->block);\n            BT_WARN(\"Duplicate SDU from src 0x%04x\", net_rx->ctx.addr);",
+        "count": 1
+      },
+      {
+        "old": "    if (BIT(seg_o) & rx->block) {\n        BT_INFO(\"Received already received fragment\");",
+        "new": "    if (BIT(seg_o) & rx->block) {\n        SAR_DIAG_LOG(\"SAR_RX_DUP src=0x%04x dst=0x%04x seq_auth=0x%llx seg_o=%u seg_n=%u block=0x%08x\",\n                     rx->src, rx->dst, (unsigned long long)rx->seq_auth, seg_o, seg_n, rx->block);\n        BT_INFO(\"Received already received fragment\");",
+        "count": 1
+      },
+      {
+        "old": "    rx->block |= BIT(seg_o);\n\n    if (rx->block != BLOCK_COMPLETE(seg_n)) {",
+        "new": "    rx->block |= BIT(seg_o);\n    SAR_DIAG_LOG(\"SAR_RX_SEG src=0x%04x dst=0x%04x seq_auth=0x%llx seq_zero=0x%04x seg_o=%u seg_n=%u block=0x%08x\",\n                 rx->src, rx->dst, (unsigned long long)rx->seq_auth,\n                 (uint16_t)(rx->seq_auth & TRANS_SEQ_ZERO_MASK), seg_o, seg_n, rx->block);\n\n    if (rx->block != BLOCK_COMPLETE(seg_n)) {",
+        "count": 1
+      },
+      {
+        "old": "        rx->block = 0U;\n\n        BT_DBG(\"New RX context. Block Complete 0x%08x\",\n               BLOCK_COMPLETE(seg_n));",
+        "new": "        rx->block = 0U;\n        SAR_DIAG_LOG(\"SAR_RX_ALLOC src=0x%04x dst=0x%04x seq_auth=0x%llx seq_zero=0x%04x seg_n=%u ctl=%u\",\n                     rx->src, rx->dst, (unsigned long long)rx->seq_auth,\n                     (uint16_t)(rx->seq_auth & TRANS_SEQ_ZERO_MASK), rx->seg_n, rx->ctl);\n\n        BT_DBG(\"New RX context. Block Complete 0x%08x\",\n               BLOCK_COMPLETE(seg_n));",
+        "count": 1
+      },
+      {
+        "old": "    BT_DBG(\"Complete SDU\");",
+        "new": "    SAR_DIAG_LOG(\"SAR_RX_COMPLETE src=0x%04x dst=0x%04x seq_auth=0x%llx seq_zero=0x%04x seg_n=%u block=0x%08x\",\n                 rx->src, rx->dst, (unsigned long long)rx->seq_auth,\n                 (uint16_t)(rx->seq_auth & TRANS_SEQ_ZERO_MASK), rx->seg_n, rx->block);\n    BT_DBG(\"Complete SDU\");",
+        "count": 1
+      }
     ],
     "esp_ble_mesh/core/storage/settings.c": [
       {
@@ -108,6 +177,12 @@
         "old": "    if (CONFIG_BLE_MESH_SEQ_STORE_RATE &&\n        (bt_mesh.seq % CONFIG_BLE_MESH_SEQ_STORE_RATE)) {",
         "new": "    /* next_seq increments before calling us. Persist the first block\n     * as well as later boundaries, even for a fresh Provisioner which\n     * only stored IV state when its network was created.\n     */\n    if (CONFIG_BLE_MESH_SEQ_STORE_RATE && bt_mesh.seq != 1U &&\n        (bt_mesh.seq % CONFIG_BLE_MESH_SEQ_STORE_RATE)) {",
         "count": 1
+      }
+    ],
+    "esp_ble_mesh/core/prov_node.c": [
+      {
+        "old": "    prov_link.algorithm = data[0];\n",
+        "new": "    /* Pump recovery: a configured 128-bit Static OOB is mandatory, not\n     * merely an advertised capability. Fail before exchanging public keys.\n     * This policy is independent of CONFIG_BLE_MESH_PROV_EPA. */\n    if (bt_mesh_prov_get()->static_val_len &&\n        (bt_mesh_prov_get()->static_val_len != 16 ||\n         !bt_mesh_prov_get()->static_val ||\n         data[0] != PROV_ALG_P256_CMAC_AES128 || data[1] != 0 ||\n         data[2] != AUTH_METHOD_STATIC || data[3] != 0 || data[4] != 0)) {\n        close_link(PROV_ERR_NVAL_FMT);\n        return;\n    }\n\n    prov_link.algorithm = data[0];\n"
       }
     ]
   },

@@ -1,9 +1,13 @@
 #include "storage.h"
 #include "nvs_flash.h"
+#include "esp_mac.h"
 namespace pump {
 bool Storage::open(uint32_t profile) {
   commissioned_ = false;
   if (nvs_flash_init() != ESP_OK || nvs_open("pumpmulti", NVS_READWRITE, &handle_) != ESP_OK) return false;
+  recovery::Id uuid{0xdd,0xdd,0x50,0x4d}; uuid[10]=2;
+  if (esp_read_mac(uuid.data()+4,ESP_MAC_BT)!=ESP_OK || !recoveryBackend_.open("pump_rec_cred") ||
+      recoveryCredentials_.load(uuid)==recovery::JournalState::Fault) return false;
   size_t size = sizeof(state_);
   const auto err = nvs_get_blob(handle_, "state", &state_, &size);
   if (err == ESP_ERR_NVS_NOT_FOUND) { state_ = PersistentState{}; state_.profile = profile; }

@@ -45,6 +45,8 @@ CONFIG_ESP_TASK_WDT_INIT=y
 CONFIG_ESP_TASK_WDT_PANIC=y
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=5
 CONFIG_COMPILER_CXX_EXCEPTIONS=n
+# Recovery handshake uses HKDF-SHA256 and AES-GCM from the SDK mbedTLS.
+CONFIG_MBEDTLS_HKDF_C=y
 
 # Super Mini onboard native USB Serial/JTAG: both logs and maintenance commands.
 CONFIG_ESP_CONSOLE_UART_DEFAULT=n

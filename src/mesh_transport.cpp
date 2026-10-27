@@ -1,4 +1,5 @@
 #include "mesh_transport.h"
+#include "recovery_gatt.h"
 #include "esp_bt.h"
 #include "esp_bt_main.h"
 #include "esp_gap_ble_api.h"
@@ -106,7 +107,7 @@ bool urgent(const Packet &p) {
 }
 }
 
-bool MeshTransport::init(uint16_t masterAddress) {
+bool MeshTransport::init(uint16_t masterAddress,const recovery::Credential *credential) {
 #if defined(PUMP_PAIRING_TRACE)
   static_assert(CONFIG_BLE_MESH_STACK_TRACE_LEVEL >= 4, "Pairing trace requires SDK debug logs");
   esp_log_level_set("BLE_MESH", ESP_LOG_DEBUG);
@@ -148,6 +149,7 @@ bool MeshTransport::init(uint16_t masterAddress) {
   ESP_LOGI("mesh", "PB-ADV only; UUID=%s identifies %s (no phone GAP name)", uuidText, deviceName_);
   if (!esp_ble_mesh_node_is_provisioned() &&
       esp_ble_mesh_node_prov_enable(ESP_BLE_MESH_PROV_ADV) != ESP_OK) return false;
+  if (!initRecoveryDiscovery(uuid,credential)) return false;
   return xTaskCreatePinnedToCore([](void *arg) { static_cast<MeshTransport *>(arg)->worker(); },
                                  "mesh_tx", 4096, this, 5, nullptr, 0) == pdPASS;
 }
